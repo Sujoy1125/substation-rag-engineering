@@ -50,9 +50,12 @@ sys.path.insert(0, str(REPO_ROOT))
 import openpyxl
 
 from src.evaluation.eval_loader import load_all
+from src.confidence.gate import ConfidenceGate, ConfidenceModel, UncalibratedGateError
+from src.confidence.gated import run_gate, split_results, summarise_changes
 from src.evaluation.generation_eval import (
     JudgeVerdict,
     build_report,
+    compare_reports,
     compute_agreement,
     print_report,
     score_ambiguous,
@@ -96,6 +99,15 @@ def parse_args():
     )
     p.add_argument("--live", action="store_true", help="call the configured LLM")
     p.add_argument("--judge", action="store_true", help="also run the LLM judge (implies --live)")
+    p.add_argument(
+        "--gated",
+        action="store_true",
+        help=(
+            "apply the calibrated confidence gate and report ungated vs gated "
+            "side by side (implies --live). This is STEP 10 — run it on --split "
+            "holdout, once. Requires a fitted model from calibrate_confidence.py"
+        ),
+    )
     p.add_argument("--review-sheet", action="store_true", help="write an xlsx for manual grading")
     p.add_argument("--agreement", metavar="XLSX", help="compute judge/human agreement from a graded sheet")
     p.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
@@ -397,6 +409,53 @@ def run_live(answerable, unanswerable, ambiguous, chunks, args) -> int:
     u_scores = [score_unanswerable(q, r) for q, r in zip(unanswerable, u_results)]
     m_scores = [score_ambiguous(q, r) for q, r in zip(ambiguous, m_results)]
 
+    # --- confidence gate (Step 10) -------------------------------------
+    # Both systems are scored by the SAME scorers over the same runs; the only
+    # variable is whether the gate rewrote the status. Anything else would
+    # confound the comparison with a difference in measurement.
+    gated_report = None
+    gate_changes = None
+    gated_records = None
+    if args.gated:
+        try:
+            model = ConfidenceModel.load()
+        except FileNotFoundError as e:
+            print(f"\nCannot run gated: {e}")
+            return 4
+        if not model.is_calibrated:
+            print(
+                "\nCannot run gated: the confidence model has no fitted weights.\n"
+                "Fit it on the calibration split first:\n"
+                "  python experiments/run_generation_eval.py --live --split calibration\n"
+                "  python experiments/calibrate_confidence.py --from <json> --max-unsafe-rate <policy>"
+            )
+            return 4
+
+        print(f"\nGate: {model.fitted_on}, fitted on {model.fitted_n_questions} questions")
+        print(
+            f"      answer_threshold={model.answer_threshold:.2f} "
+            f"clarify_threshold={model.clarify_threshold:.2f}"
+        )
+        gate = ConfidenceGate(model)
+        try:
+            a_gated = run_gate(gate, a_results)
+            u_gated = run_gate(gate, u_results)
+            m_gated = run_gate(gate, m_results)
+        except UncalibratedGateError as e:
+            print(f"\nCannot run gated: {e}")
+            return 4
+
+        all_gated = a_gated + u_gated + m_gated
+        gate_changes = summarise_changes(all_gated)
+        gated_records = [g.to_dict() for g in all_gated]
+
+        gated_report = build_report(
+            f"{args.label or 'gated'} [GATED]",
+            [score_answerable(q, g.gated) for q, g in zip(answerable, a_gated)],
+            [score_unanswerable(q, g.gated) for q, g in zip(unanswerable, u_gated)],
+            [score_ambiguous(q, g.gated) for q, g in zip(ambiguous, m_gated)],
+        )
+
     judged = {}
     if args.judge:
         print("\nJudging attempted answers...")
@@ -414,6 +473,25 @@ def run_live(answerable, unanswerable, ambiguous, chunks, args) -> int:
     report = build_report(label, a_scores, u_scores, m_scores)
     print_report(report)
 
+    if gated_report is not None:
+        print_report(gated_report)
+        print("\n--- what the gate did ---")
+        for transition, n in gate_changes.items():
+            marker = "" if transition.split(" -> ")[0] == transition.split(" -> ")[1] else "  <-- changed"
+            print(f"  {n:>3}  {transition}{marker}")
+        if all(t.split(" -> ")[0] == t.split(" -> ")[1] for t in gate_changes):
+            print(
+                "\n  The gate changed nothing. Either the thresholds are too low for\n"
+                "  this data, or the signals do not separate it. Either way there is\n"
+                "  no gating effect to report."
+            )
+        compare_reports(report, gated_report)
+        print(
+            "\n  The claim is the PAIR: unsafe assertions down, coverage held.\n"
+            "  A gate that drives unsafe to zero by abstaining from everything has\n"
+            "  not improved the system, and the coverage column will show it."
+        )
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_json = REPO_ROOT / "experiments" / f"generation_eval_{stamp}.json"
     out_json.write_text(
@@ -426,6 +504,10 @@ def run_live(answerable, unanswerable, ambiguous, chunks, args) -> int:
                 "top_k": args.top_k,
                 "judge_enabled": args.judge,
                 "judge_calibrated": False,
+                "gated": args.gated,
+                "gated_report": None if gated_report is None else gated_report.to_dict(),
+                "gate_transitions": gate_changes,
+                "gate_decisions": gated_records,
                 "note": (
                     "Judge verdicts are uncalibrated. Report Cohen's kappa from "
                     "--agreement alongside any judged rate."
@@ -492,7 +574,7 @@ def main() -> int:
         f"unanswerable {len(unanswerable)} | ambiguous {len(ambiguous)}\n"
     )
 
-    if args.judge:
+    if args.judge or args.gated:
         args.live = True
     if args.live:
         return run_live(answerable, unanswerable, ambiguous, chunks, args)

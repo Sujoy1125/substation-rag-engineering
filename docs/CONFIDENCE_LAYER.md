@@ -146,14 +146,53 @@ They are not results.
 
 ---
 
+## Step 10 — the comparison
+
+`--gated` applies the fitted gate to every result and reports both systems side
+by side.
+
+```powershell
+python experiments\run_generation_eval.py --live --split holdout --gated
+```
+
+The gate's verdict is expressed in the vocabulary the scorers already speak, so
+**both systems are scored by the same scorers over the same runs** — one
+variable changed, nothing confounded:
+
+```
+Decision.ANSWER   ->  AnswerStatus.ANSWER                (unchanged)
+Decision.ABSTAIN  ->  AnswerStatus.INSUFFICIENT_EVIDENCE
+Decision.CLARIFY  ->  AnswerStatus.NEEDS_CLARIFICATION
+```
+
+**An overruled answer loses its citations** in the gated view. A system that
+abstains shows the user no answer and cites nothing; leaving citations attached
+would let the gated report take credit for text it never displayed — flattering
+precisely the number the comparison exists to test. The ungated result is kept
+intact alongside, so nothing is lost for diagnostics.
+
+The run prints a transition table (`ANSWER -> INSUFFICIENT_EVIDENCE: 4`) so a
+gate that changes nothing, or one that abstains from everything, is visible at
+a glance rather than hidden inside similar-looking rates.
+
+**Read the comparison as a pair.** A gate can drive unsafe assertions to zero
+by refusing to answer at all; the coverage column is what stops that reading as
+success. A test constructs exactly that degenerate gate and asserts coverage
+falls to 0.000 alongside it.
+
+---
+
 ## What is verified, and what is not
 
-**Verified.** 24 offline tests: signal bounds and orientation, unreached
+**Verified.** 36 offline tests. Signals: bounds and orientation, unreached
 questions scoring nothing, invalid labels depressing validity, rank and
-specificity ordering, the uncalibrated gate refusing to decide, every
-non-override path, score bounds, model round-trip, and calibration refusing
-insufficient or single-class data. Calibration verified end-to-end on synthetic
-separable data. Suite total: **141 passed**.
+specificity ordering. Gate: uncalibrated refusal, every non-override path,
+score bounds, model round-trip, calibration refusing insufficient or
+single-class data. Gated path: overruled answers losing citations, the ungated
+result surviving intact, identical metrics under a no-op gate, transition
+accounting, and the degenerate abstain-from-everything gate showing zero
+coverage rather than a safety win. Calibration verified end-to-end on synthetic
+separable data. Suite total: **153 passed**.
 
 **Not verified.** Nothing about real confidence behaviour. No weights have been
 fitted, because that requires a live generation run that has not happened. No
