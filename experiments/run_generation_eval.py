@@ -100,7 +100,43 @@ def parse_args():
     p.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     p.add_argument("--limit", type=int, default=None, help="first N questions per class (cheap trials)")
     p.add_argument("--label", default="", help="label for this run in the report")
+    p.add_argument(
+        "--split",
+        choices=["all", "calibration", "holdout"],
+        default="all",
+        help=(
+            "which frozen split to evaluate (evaluation_v2/split_v1.json). "
+            "'all' for baseline measurement where nothing is being tuned; "
+            "'calibration' while fitting the confidence gate; "
+            "'holdout' ONCE, to report the final result"
+        ),
+    )
     return p.parse_args()
+
+
+def apply_split(args, answerable, unanswerable, ambiguous):
+    """Filter the three classes to the requested side of the frozen split."""
+    if args.split == "all":
+        return answerable, unanswerable, ambiguous
+
+    from src.evaluation.splits import load_split
+
+    split = load_split()
+    keep = split.ids_for(args.split)
+    answerable = [q for q in answerable if q.question_id in keep]
+    unanswerable = [q for q in unanswerable if q.question_id in keep]
+    ambiguous = [q for q in ambiguous if q.question_id in keep]
+
+    print(f"SPLIT: {args.split} — {split.summary()}")
+    if args.split == "holdout":
+        print(
+            "\n  You are spending the holdout. These questions are the only\n"
+            "  out-of-sample evidence you have that the gate generalises rather\n"
+            "  than being fitted to the calibration set. Tuning anything after\n"
+            "  reading this run turns them into calibration data, and the final\n"
+            "  number stops being defensible.\n"
+        )
+    return answerable, unanswerable, ambiguous
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +409,7 @@ def run_live(answerable, unanswerable, ambiguous, chunks, args) -> int:
         if errors:
             print(f"  {len(errors)} judge call(s) failed: {errors[0].error}")
 
-    label = args.label or f"{client.provider}/{client.model} top_k={args.top_k}"
+    label = args.label or f"{client.provider}/{client.model} top_k={args.top_k} split={args.split}"
     report = build_report(label, a_scores, u_scores, m_scores)
     print_report(report)
 
@@ -433,6 +469,7 @@ def main() -> int:
         return run_agreement(args.agreement)
 
     answerable, unanswerable, ambiguous = load_all()
+    answerable, unanswerable, ambiguous = apply_split(args, answerable, unanswerable, ambiguous)
     if args.limit:
         answerable = answerable[: args.limit]
         unanswerable = unanswerable[: args.limit]

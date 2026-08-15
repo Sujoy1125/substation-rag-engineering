@@ -142,24 +142,47 @@ question*, never about whether evidence exists.
 
 ---
 
-## Calibration discipline
+## Calibration discipline — DECIDED AND FROZEN
 
-The confidence gate will be calibrated on `evaluation_v2`. That creates an
-obvious hazard: weights tuned on the same 57 questions used to report the final
-result will overstate the gain. Options, in order of preference:
+The confidence gate has knobs, and knobs get set by looking at what performs
+best. Reporting the final result on the same questions the knobs were fitted to
+measures how well the gate was fitted to 57 specific questions, not how well it
+works. **A stratified holdout was frozen before any gate result was observed:**
 
-1. Hold out a slice of the answerable set from calibration and report on it
-   separately.
-2. Calibrate on `evaluation_v2`, report on D09's 20 questions as an
-   out-of-sample check.
-3. Calibrate and report on the same set, and **say so explicitly** in the
-   write-up.
+```
+evaluation_v2/split_v1.json          committed, do not regenerate
 
-Option 3 is acceptable only if stated. Silently doing it is the kind of thing
-a sharp reviewer finds.
+calibration   40   (31 answerable, 5 unanswerable, 4 ambiguous)
+holdout       17   (13 answerable, 2 unanswerable, 2 ambiguous)
+```
+
+Rules:
+
+- **Tune only on `--split calibration`.** Look at it as often as you like.
+- **Run `--split holdout` once**, at the end, to report. Tuning after reading
+  it turns those questions into calibration data and the number stops meaning
+  anything.
+- `--split all` is for baseline measurement where nothing is being tuned
+  (Steps 6–8). In-sample versus out-of-sample only matters once a gate exists.
+
+The answerable set is stratified by (difficulty, document): with 44 questions
+an unstratified draw can easily land all-Easy or single-document, and the
+reported number would then describe the draw rather than the gate. Achieved
+mix — holdout 6 Easy / 6 Medium / 1 Hard across 8 documents, against
+calibration's 13 / 16 / 2. Selection is by SHA-256 of the question id:
+deterministic, independent of workbook row order, and not tunable by anyone
+hoping for a friendlier draw.
+
+All three classes appear in the holdout. A holdout with no unanswerable
+questions could not test abstention, which is half the confidence-gating claim.
+
+`freeze()` refuses to overwrite an existing split file, and a test asserts the
+committed file still matches what the code computes — so the split cannot drift
+silently.
 
 Note also that `KB_v1.1/rag_test_55.xlsx` was frozen as a retrieval benchmark
-and is not to be used for confidence-threshold tuning.
+and is not to be used for confidence-threshold tuning. D09 remains available as
+a further independent check if one is wanted later.
 
 ---
 

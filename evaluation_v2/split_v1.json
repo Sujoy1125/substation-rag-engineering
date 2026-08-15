@@ -1,0 +1,81 @@
+{
+  "split": "evaluation_v2 calibration / holdout",
+  "version": 1,
+  "holdout_fraction": 0.3,
+  "note": "FROZEN. Calibrate the confidence gate on the calibration ids only. Report final results on the holdout ids. Do not regenerate this file after any gate performance has been observed \u2014 a holdout chosen with knowledge of the results is not a holdout.",
+  "answerable": {
+    "calibration": [
+      "V2-002",
+      "V2-003",
+      "V2-005",
+      "V2-006",
+      "V2-008",
+      "V2-009",
+      "V2-011",
+      "V2-012",
+      "V2-014",
+      "V2-015",
+      "V2-016",
+      "V2-017",
+      "V2-018",
+      "V2-021",
+      "V2-022",
+      "V2-023",
+      "V2-024",
+      "V2-026",
+      "V2-028",
+      "V2-029",
+      "V2-030",
+      "V2-031",
+      "V2-032",
+      "V2-033",
+      "V2-035",
+      "V2-036",
+      "V2-040",
+      "V2-041",
+      "V2-042",
+      "V2-043",
+      "V2-044"
+    ],
+    "holdout": [
+      "V2-001",
+      "V2-004",
+      "V2-007",
+      "V2-010",
+      "V2-013",
+      "V2-019",
+      "V2-020",
+      "V2-025",
+      "V2-027",
+      "V2-034",
+      "V2-037",
+      "V2-038",
+      "V2-039"
+    ]
+  },
+  "unanswerable": {
+    "calibration": [
+      "V2-U02",
+      "V2-U03",
+      "V2-U04",
+      "V2-U05",
+      "V2-U07"
+    ],
+    "holdout": [
+      "V2-U01",
+      "V2-U06"
+    ]
+  },
+  "ambiguous": {
+    "calibration": [
+      "V2-A01",
+      "V2-A02",
+      "V2-A03",
+      "V2-A04"
+    ],
+    "holdout": [
+      "V2-A05",
+      "V2-A06"
+    ]
+  }
+}
