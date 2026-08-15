@@ -17,3 +17,6 @@ experiments/*.json
 !experiments/.gitkeep
 
 src/embeddings/*.backup
+
+# Scratch: stale git lock files moved here (the device bridge cannot delete)
+_to_delete/
