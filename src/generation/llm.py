@@ -18,7 +18,11 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Sequence
+from pathlib import Path
+from typing import List, Optional, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_ENV_PATH = REPO_ROOT / ".env"
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_TEMPERATURE = 0.0
@@ -27,6 +31,31 @@ DEFAULT_MAX_TOKENS = 1200
 
 class LLMUnavailableError(RuntimeError):
     """The configured provider cannot be reached or is not configured."""
+
+
+def load_dotenv(path: str | Path = DEFAULT_ENV_PATH) -> bool:
+    """Read KEY=VALUE lines from .env into os.environ. Returns True if a file
+    was found.
+
+    Lives here, not in a CLI script, because EVERY entry point that builds a
+    client needs it — an evaluation runner that silently ignores .env and then
+    reports "API key unset" sends you hunting for a key you already set.
+    Existing environment variables always win, so an explicitly exported value
+    is never clobbered by the file. Avoids a python-dotenv dependency for what
+    is four lines of parsing.
+    """
+    env_path = Path(path)
+    if not env_path.exists():
+        return False
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+    return True
 
 
 class MockClientInEvaluationError(RuntimeError):
@@ -52,9 +81,15 @@ class LLMClient(ABC):
     @abstractmethod
     def complete(self, messages: Sequence[dict]) -> LLMResponse: ...
 
+    def availability_error(self) -> Optional[str]:
+        """Why this client cannot run, or None if it can. Must be specific:
+        "package missing or key unset" makes the reader check both when only
+        one is actually wrong."""
+        return None
+
     def is_available(self) -> bool:
         """Cheap, side-effect-free readiness check. Must not make a paid call."""
-        return True
+        return self.availability_error() is None
 
 
 def assert_real_client(client: LLMClient) -> None:
@@ -120,12 +155,20 @@ class OpenAIClient(LLMClient):
         self._client = OpenAI(**kwargs)
         return self._client
 
-    def is_available(self) -> bool:
+    def availability_error(self) -> Optional[str]:
         try:
             import openai  # noqa: F401
         except ImportError:
-            return False
-        return bool(self._api_key)
+            return (
+                "the 'openai' package is not installed in this environment — "
+                "run:  pip install openai"
+            )
+        if not self._api_key:
+            return (
+                "OPENAI_API_KEY is empty. Put it in .env at the repository root "
+                "(NOT .env.example, which is the committed template)."
+            )
+        return None
 
     def complete(self, messages: Sequence[dict]) -> LLMResponse:
         import time
@@ -189,12 +232,20 @@ class AnthropicClient(LLMClient):
         self.timeout = timeout
         self._client = None
 
-    def is_available(self) -> bool:
+    def availability_error(self) -> Optional[str]:
         try:
             import anthropic  # noqa: F401
         except ImportError:
-            return False
-        return bool(self._api_key)
+            return (
+                "the 'anthropic' package is not installed in this environment — "
+                "run:  pip install anthropic"
+            )
+        if not self._api_key:
+            return (
+                "ANTHROPIC_API_KEY is empty. Put it in .env at the repository root "
+                "(NOT .env.example, which is the committed template)."
+            )
+        return None
 
     def complete(self, messages: Sequence[dict]) -> LLMResponse:
         import time
@@ -268,22 +319,27 @@ PROVIDERS = {
 }
 
 
-def client_from_env() -> LLMClient:
+def client_from_env(env_path: str | Path = DEFAULT_ENV_PATH) -> LLMClient:
     """Build the configured client. `LLM_PROVIDER` selects; default openai.
+
+    Loads .env first, so every caller — CLI, smoke test, evaluation runner —
+    picks up the same configuration without each having to remember to do it.
 
     Raises LLMUnavailableError rather than returning a degraded client, so a
     misconfiguration fails at startup instead of halfway through a 44-question
-    evaluation run.
+    evaluation run. The message names the one thing that is actually wrong.
     """
+    env_found = load_dotenv(env_path)
+
     name = (os.getenv("LLM_PROVIDER") or "openai").strip().lower()
     if name not in PROVIDERS:
         raise LLMUnavailableError(
             f"Unknown LLM_PROVIDER '{name}'. Known providers: {sorted(PROVIDERS)}"
         )
+
     client = PROVIDERS[name]()
-    if not client.is_available():
-        raise LLMUnavailableError(
-            f"Provider '{name}' is not usable: package missing or API key unset. "
-            f"See .env.example."
-        )
+    reason = client.availability_error()
+    if reason is not None:
+        hint = "" if env_found else f"\n  (no .env file found at {Path(env_path)})"
+        raise LLMUnavailableError(f"provider '{name}' — {reason}{hint}")
     return client

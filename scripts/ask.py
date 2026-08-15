@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -23,22 +22,6 @@ from src.generation.llm import LLMUnavailableError, client_from_env
 from src.generation.pipeline import DEFAULT_TOP_K, RAGPipeline, load_kb
 
 
-def load_dotenv_if_present() -> None:
-    """Minimal .env reader — avoids a python-dotenv dependency for four lines
-    of parsing. Existing environment variables always win."""
-    env_path = REPO_ROOT / ".env"
-    if not env_path.exists():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("question", help="the question to ask")
@@ -47,8 +30,7 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="emit the full result as JSON")
     args = parser.parse_args()
 
-    load_dotenv_if_present()
-    chunks = load_kb()
+    chunks = load_kb()  # client_from_env() loads .env when the LLM is needed
 
     if args.evidence:
         from src.retrieval.equipment_aware_v2 import EquipmentAwareRetrieverV2

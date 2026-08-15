@@ -10,6 +10,7 @@ malformed replies degrade instead of crashing.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -421,6 +422,50 @@ def test_real_client_passes_the_guard():
             raise NotImplementedError
 
     assert_real_client(Fake())  # must not raise
+
+
+def test_dotenv_is_loaded_into_environment(tmp_path, monkeypatch):
+    """Every entry point must pick up .env. The evaluation runner previously
+    did not, and reported 'API key unset' for a key that was already set."""
+    from src.generation.llm import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text('OPENAI_API_KEY="sk-from-file"\n# comment\nOPENAI_MODEL=gpt-x\n')
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    assert load_dotenv(env) is True
+    assert os.environ["OPENAI_API_KEY"] == "sk-from-file"
+    assert os.environ["OPENAI_MODEL"] == "gpt-x"
+
+
+def test_existing_environment_wins_over_dotenv(tmp_path, monkeypatch):
+    from src.generation.llm import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text("OPENAI_API_KEY=sk-from-file\n")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-already-exported")
+
+    load_dotenv(env)
+    assert os.environ["OPENAI_API_KEY"] == "sk-already-exported"
+
+
+def test_missing_dotenv_is_not_an_error(tmp_path):
+    from src.generation.llm import load_dotenv
+
+    assert load_dotenv(tmp_path / "nope.env") is False
+
+
+def test_unavailable_reason_names_the_missing_key_not_both_causes(monkeypatch):
+    """'package missing or key unset' sends you checking two things when only
+    one is wrong."""
+    from src.generation.llm import OpenAIClient
+
+    pytest.importorskip("openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    reason = OpenAIClient(api_key="").availability_error()
+    assert reason and "OPENAI_API_KEY is empty" in reason
+    assert ".env.example" in reason  # points at the right file
 
 
 def test_scripted_client_raises_when_exhausted():
