@@ -57,6 +57,130 @@ class AskRequest(BaseModel):
         return v
 
 
+class CitationOut(BaseModel):
+    label: str = Field(description="The label the model cited, e.g. E1")
+    chunk_id: str = Field(description="Resolvable at GET /evidence/{chunk_id}")
+    document_id: str
+    document_title: str
+    section: str
+    page: str
+    organization: str
+    authority_level: str
+    retrieval_rank: int = Field(description="Rank of this chunk in the retrieved set")
+
+
+class EvidenceOut(BaseModel):
+    chunk_id: str
+    score: float
+    rank: int
+
+
+class GateOut(BaseModel):
+    decision: str
+    confidence: Optional[float] = None
+    reason: str
+    model_status: str
+    signals: Dict[str, float]
+
+
+class TimingOut(BaseModel):
+    retrieval: float
+    generation: float
+    total: float
+
+
+class LLMOut(BaseModel):
+    provider: str
+    model: str
+
+
+class AskResponse(BaseModel):
+    """The shape of every answer, including the abstentions.
+
+    Optional fields are declared rather than omitted so the schema shown in
+    /docs is the whole contract. A caller reading this page should be able to
+    see that an abstention is a normal, documented outcome — not an error —
+    and that `gated` tells them whether the confidence layer was in play.
+    """
+
+    question: str
+    status: str = Field(
+        description=(
+            "ANSWER | INSUFFICIENT_EVIDENCE | NEEDS_CLARIFICATION | UNSUPPORTED | "
+            "PARSE_ERROR. Anything other than ANSWER means no answer text is served."
+        )
+    )
+    answer: str = Field(description="Empty unless status is ANSWER")
+    display_text: str = Field(description="Rendered answer with its reference list")
+    citations: List[CitationOut]
+    evidence_considered: List[EvidenceOut] = Field(
+        description="Everything retrieved, cited or not — the recall side of the audit"
+    )
+    gated: bool = Field(
+        description=(
+            "Whether a calibrated confidence gate judged this answer. False means "
+            "the answer is the model's own, ungated — see `warning`."
+        )
+    )
+    gate: Optional[GateOut] = None
+    llm: LLMOut
+    timing_ms: TimingOut
+    warning: Optional[str] = None
+    missing_information: Optional[str] = None
+    clarification_question: Optional[str] = None
+    downgrade_reason: Optional[str] = None
+
+
+class LLMHealthOut(BaseModel):
+    provider: str
+    model: str
+    ready: bool
+    problem: Optional[str] = None
+
+
+class HealthResponse(BaseModel):
+    status: str = Field(description="ok | degraded")
+    kb_chunks: int
+    top_k: int
+    retriever: str
+    llm: LLMHealthOut
+    gated: bool
+    gate_warning: Optional[str] = None
+
+
+def _build_chunk_model():
+    """Derive the /evidence schema from the Chunk dataclass itself.
+
+    Hand-listing 24 field names here would drift the moment the KB schema
+    changes, and the failure would be silent: FastAPI filters a response to its
+    declared model, so a forgotten field would simply vanish from the endpoint
+    people use to audit citations. Deriving it makes drift impossible.
+    """
+    from dataclasses import fields as dataclass_fields
+
+    from pydantic import create_model
+
+    return create_model(
+        "ChunkOut",
+        **{f.name: (str, ...) for f in dataclass_fields(Chunk)},
+        __doc__="A full KB record, sentinels included.",
+    )
+
+
+ChunkOut = _build_chunk_model()
+
+
+ERROR_RESPONSES = {
+    503: {
+        "description": (
+            "The language model could not be reached. The body names the cause — "
+            "no credit, rate limited, bad key, network — because each has a "
+            "different fix and a generic error sends you debugging the wrong one."
+        )
+    }
+}
+
+
 @dataclass
 class ServiceConfig:
     kb_path: Path = DEFAULT_KB_PATH
@@ -266,13 +390,23 @@ def create_app(service: RAGService):
         """
         return RedirectResponse(url="/docs")
 
-    @app.get("/health")
+    @app.get(
+        "/health",
+        response_model=HealthResponse,
+        responses={503: {"model": HealthResponse, "description": "Provider not configured"}},
+        summary="Readiness, without spending a request",
+    )
     def health():
         payload = service.health()
         code = 200 if payload["status"] == "ok" else 503
         return JSONResponse(payload, status_code=code)
 
-    @app.post("/ask")
+    @app.post(
+        "/ask",
+        response_model=AskResponse,
+        responses=ERROR_RESPONSES,
+        summary="Ask a question against the frozen knowledge base",
+    )
     def ask(req: AskRequest):
         try:
             return service.ask(req.question, top_k=req.top_k)
@@ -282,7 +416,12 @@ def create_app(service: RAGService):
             # caller is not left debugging the wrong system.
             raise HTTPException(status_code=503, detail=str(e)) from e
 
-    @app.get("/evidence/{chunk_id}")
+    @app.get(
+        "/evidence/{chunk_id}",
+        response_model=ChunkOut,
+        responses={404: {"description": "No such chunk in the frozen KB"}},
+        summary="The KB record behind a citation",
+    )
     def evidence(chunk_id: str):
         found = service.evidence(chunk_id)
         if found is None:

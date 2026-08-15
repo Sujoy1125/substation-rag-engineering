@@ -262,6 +262,39 @@ def test_evidence_returns_the_full_record_including_sentinels():
     assert body["notes"] == "NOT VERIFIED"
 
 
+def test_evidence_schema_covers_every_kb_field():
+    """FastAPI filters a response to its declared model, so a field missing from
+    the schema disappears silently from the endpoint people use to audit
+    citations. The schema is derived from Chunk for exactly this reason; this
+    test fails loudly if that ever stops being true."""
+    from dataclasses import fields
+
+    from src.api.service import ChunkOut
+
+    assert set(ChunkOut.model_fields) == {f.name for f in fields(Chunk)}
+
+
+def test_documented_schema_does_not_drop_fields_the_service_emits():
+    """A response_model that omits a key would quietly truncate live responses."""
+    from src.api.service import AskResponse
+
+    service = build_service([GOOD_REPLY], gate_warning="uncalibrated")
+    emitted = set(service.ask("oil BDV frequency").keys())
+    assert emitted <= set(AskResponse.model_fields), (
+        f"service emits keys the schema drops: {emitted - set(AskResponse.model_fields)}"
+    )
+
+
+def test_openapi_documents_the_answer_shape_not_a_bare_string():
+    c = client_for(build_service([GOOD_REPLY]))
+    spec = c.get("/openapi.json").json()
+
+    ask = spec["paths"]["/ask"]["post"]["responses"]
+    assert "$ref" in json.dumps(ask["200"]), "/ask 200 must reference a schema"
+    assert "503" in ask, "an unreachable provider is a documented outcome, not a surprise"
+    assert "AskResponse" in spec["components"]["schemas"]
+
+
 def test_root_sends_a_browser_to_the_docs_instead_of_404ing():
     """Opening the root URL is the first thing anyone does. A 404 there reads
     as a broken service."""
