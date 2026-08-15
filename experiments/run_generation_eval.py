@@ -382,14 +382,12 @@ def run_live(answerable, unanswerable, ambiguous, chunks, args) -> int:
         print(f"  {reason}")
         print("!" * 72)
         print(
-            "\nNothing was measured, so no report is produced. Common causes:\n"
-            "  - no internet route to api.openai.com (campus/corporate firewall,\n"
-            "    proxy required, or captive portal)\n"
-            "  - the API key is revoked, mistyped, or has no credit\n"
-            "  - OPENAI_BASE_URL is set to something unreachable\n"
-            "\nQuick check:\n"
-            '  python -c "import openai,os;'
-            'print(openai.OpenAI(api_key=os.getenv(\'OPENAI_API_KEY\')).models.list().data[0].id)"\n'
+            "\nNothing was measured, so no report is produced.\n"
+            "\n'Connection error' covers at least six distinct failures — DNS,\n"
+            "firewall, TLS interception, proxy, revoked key, no credit — and the\n"
+            "fix differs for each. Find out which one this is:\n"
+            "\n    python scripts/diagnose_network.py\n"
+            "\nIt walks the layers in order and names the one that breaks.\n"
             "\nThe free dry mode still works and needs no network:\n"
             "  python experiments/run_generation_eval.py"
         )
