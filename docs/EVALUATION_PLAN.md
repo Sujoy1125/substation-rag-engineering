@@ -101,7 +101,7 @@ the first fifteen.
 ## Order of operations
 
 ```
-STEP 6   --live                    deterministic scoring, all 57
+STEP 6   --live --split all               deterministic scoring, all 57
    ↓
 STEP 6b  --live --judge --review-sheet    add answer correctness
    ↓
@@ -109,10 +109,21 @@ STEP 6c  grade a sample → --agreement     establish judge trustworthiness
    ↓
 STEP 7/8 (already covered — unanswerable and ambiguous run in the same pass)
    ↓
-STEP 9   confidence gate, weights calibrated on the signals recorded above
+STEP 9   --live --split calibration       then calibrate_confidence.py
    ↓
-STEP 10  compare_reports(ungated, gated) on the same 57 questions
+STEP 10  --live --split holdout           ONCE. gated vs ungated. the result.
 ```
+
+Step 9 in full:
+
+```powershell
+python experiments\run_generation_eval.py --live --split calibration
+python experiments\calibrate_confidence.py ^
+    --from experiments\generation_eval_<stamp>.json --max-unsafe-rate 0.05
+```
+
+`--max-unsafe-rate` has no default: it is the project's safety policy and must
+be a stated decision. See [`CONFIDENCE_LAYER.md`](CONFIDENCE_LAYER.md).
 
 Steps 7 and 8 need no separate run: the runner evaluates all three classes in
 one pass. Run `--live --limit 3` first — nine questions, a few cents — and read

@@ -54,6 +54,7 @@ from src.retrieval.benchmark import BenchmarkResult, run_benchmark
 from src.retrieval.document_diversity import DocumentDiversityReranker
 from src.retrieval.equipment_aware import EquipmentAwareRetriever
 from src.retrieval.equipment_aware_v2 import EquipmentAwareRetrieverV2
+from src.retrieval.equipment_aware_v3 import EquipmentAwareRetrieverV3
 from src.retrieval.gold_questions import load_gold_answerable
 from src.retrieval.retrievers import BM25Retriever
 
@@ -104,6 +105,13 @@ def build_configs():
                 pool_k=DIVERSITY_POOL_K,
                 name="bm25_equipment_aware_v2_diversity",
             ),
+        ),
+        # V3: demotes chunks positively tagged with different equipment, while
+        # leaving the 46% of chunks whose Equipment field is a sentinel
+        # untouched. See src/retrieval/equipment_aware_v3.py.
+        (
+            "bm25_equipment_aware_v3",
+            EquipmentAwareRetrieverV3(BM25Retriever(), name="bm25_equipment_aware_v3"),
         ),
     ]
 

@@ -131,6 +131,60 @@ Per-question root-cause attribution for every recovered question is produced by
 
 ---
 
+## The four standing failures — diagnosed
+
+`V2-011`, `V2-013`, `V2-015`, `V2-043` never get their gold evidence into the
+top-5 context. Diagnosed rather than assumed:
+
+| question | gold chunk | in KB? | retrieved at rank | gold `Equipment` |
+|---|---|---|---|---|
+| V2-011 | D03-C0006 | yes | 19 | `NOT VERIFIED` |
+| V2-013 | D04-C0007 | yes | 33 | `NOT VERIFIED` |
+| V2-015 | D04-C0117 | yes | 18 | `Transformer` |
+| V2-043 | D08-C0412 | yes | 10 | `Bushing` |
+
+**All four gold chunks are present in the KB and all four are retrieved.** They
+are out-ranked, not missing. So this is a ranking problem, and **KB expansion
+would not fix it** — the handoff's rule "expand only when an evaluation failure
+proves it necessary" is not triggered, because the evidence is already there.
+
+### A hypothesis, tested and rejected
+
+Two of the four gold chunks have `Equipment = NOT VERIFIED`, and **46% of
+KB_v1.1 (801 of 1745 chunks) shares that sentinel**. V2 multiplies matched
+chunks by 1.25 and leaves everything else alone, so "tagged with different
+equipment" and "never annotated" score identically — absence of evidence
+treated as evidence of absence, across nearly half the corpus.
+
+`EquipmentAwareRetrieverV3` (`src/retrieval/equipment_aware_v3.py`) tests the
+fix: match ×1.25, unknown ×1.0, known-mismatch ×0.8. Measured on both datasets:
+
+| configuration | D09 R@3 / MRR | evaluation_v2 R@3 / MRR |
+|---|---|---|
+| **bm25_equipment_aware_v2** | 0.850 / 0.756 | **0.909 / 0.828** |
+| bm25_equipment_aware_v3 | 0.850 / 0.756 | 0.886 / 0.813 |
+
+**Rejected.** Identical on D09, worse on evaluation_v2 — one question of R@3 and
+0.015 of MRR. The demotion costs more than the sentinel neutrality gains,
+presumably because equipment tags are frequently partial (a chunk tagged only
+`Bushing` is often still the right answer to a transformer question), so
+"mismatch" is a noisier signal than it looks.
+
+V3 stays in the repo and in the benchmark as a measured negative result, for
+the same reason the diversity reranker does: the next person to have this idea
+should find the number rather than re-run the experiment.
+
+### What this leaves
+
+The four questions remain a **documented limitation, not a defect to fix**.
+Raising `top_k` to 10 would recover only `V2-043` (rank 10) and would dilute
+every prompt to buy one question. The correct system behaviour on all four is
+to **abstain** — the evidence never reaches the model, so any answer would be
+ungrounded. They are therefore useful test cases for the abstain path rather
+than a gap to close.
+
+---
+
 ## Known limitations — measured, not hidden
 
 - **Dense and hybrid retrieval are unmeasured.** The earlier sandbox blocked

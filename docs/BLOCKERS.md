@@ -18,6 +18,15 @@ curl -sS -o /dev/null -w "%{http_code}" https://huggingface.co   -> 403
 curl -sS -o /dev/null -w "%{http_code}" https://api.openai.com   -> 403
 curl -sS -o /dev/null -w "%{http_code}" https://pypi.org         -> 200
 ```
+
+**Re-confirmed 2026-08-15**, independently, in a different sandbox during the
+generation phase — `sentence_transformers` imports fine (PyPI reachable) but
+loading `BAAI/bge-small-en-v1.5` still fails with `ProxyError 403 Forbidden`.
+So this is a stable property of the sandbox egress policy, not a transient
+outage. **Dense and hybrid retrieval remain unmeasured, and nothing anywhere in
+this repository claims otherwise.**
+
+The unblock is the local Windows run below; it needs no code changes.
 `pip install torch sentence-transformers` succeeds (pulls from PyPI/pythonhosted).
 Loading `BAAI/bge-small-en-v1.5` then fails with a clean, caught
 `ModelUnavailableError` (`src/embeddings/provider.py`) — no fake vectors

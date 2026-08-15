@@ -59,6 +59,7 @@ from src.evaluation.generation_eval import (
     score_answerable,
     score_unanswerable,
 )
+from src.confidence.signals import extract_signals
 from src.evaluation.judge import AnswerJudge, judge_all
 from src.generation.answer import AnswerStatus
 from src.generation.llm import LLMUnavailableError, client_from_env
@@ -429,7 +430,17 @@ def run_live(answerable, unanswerable, ambiguous, chunks, args) -> int:
                     "Judge verdicts are uncalibrated. Report Cohen's kappa from "
                     "--agreement alongside any judged rate."
                 ),
+                "split": args.split,
                 "report": report.to_dict(),
+                # Confidence signals are computed here, at the point the run
+                # happened, so the calibrator never has to reconstruct them
+                # from a serialised result and risk drifting from signals.py.
+                "confidence_signals": {
+                    q.question_id: extract_signals(r).to_dict()
+                    for q, r in list(zip(answerable, a_results))
+                    + list(zip(unanswerable, u_results))
+                    + list(zip(ambiguous, m_results))
+                },
                 "per_question": {
                     "answerable": [r.to_dict() for r in a_results],
                     "unanswerable": [r.to_dict() for r in u_results],
