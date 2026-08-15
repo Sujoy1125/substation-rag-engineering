@@ -1,18 +1,36 @@
+# Core dependencies — everything the project actually runs on.
+#
+#     pip install -r requirements.txt
+#
+# Installs in roughly a minute. Deliberately does NOT include torch or
+# sentence-transformers: those are a ~2.5 GB download needed only by dense
+# retrieval, which is UNMEASURED and blocked in our environment (see
+# docs/BLOCKERS.md). Making every team member download 2.5 GB for a code path
+# that cannot produce a number would be a poor trade. If you want to work on
+# dense retrieval, install requirements-dense.txt as well.
+
+# Knowledge base ingestion — reads the frozen .xlsx workbooks
 openpyxl>=3.1
-pandas>=2.0
-scikit-learn>=1.3
+
+# Retrieval
 rank_bm25>=0.2
-pytest>=7.4
-# Service layer (src/api/service.py). The test suite exercises the whole HTTP
-# surface offline against ScriptedClient — no API key, no network, no cost.
+numpy>=1.24
+scikit-learn>=1.3          # TF-IDF baseline, and logistic regression for calibration
+
+# Generation. openai is the default provider and also speaks to any
+# OpenAI-compatible endpoint (Azure, Gemini, Groq, OpenRouter) via
+# OPENAI_BASE_URL — see .env.example.
+openai>=1.40
+
+# Service layer. The test suite exercises the whole HTTP surface offline
+# against ScriptedClient — no API key, no network, no cost.
 fastapi>=0.110
 uvicorn>=0.29
-# psycopg[binary], pgvector — add when dense retrieval is unblocked; the current
-# pipeline retrieves in-process over the frozen KB and needs no database.
-# Phase 4 additions (embeddings — dense retrieval blocked in sandbox, see docs/BLOCKERS.md)
-sentence-transformers>=3.0
-torch>=2.0
-# Generation layer (see docs/GENERATION_LAYER.md). openai is the configured
-# default provider; anthropic is optional and only needed if LLM_PROVIDER=anthropic.
-# The test suite does not import either — it runs offline against ScriptedClient.
-openai>=1.40
+
+# Tests
+pytest>=7.4
+
+# NOT required by the current pipeline:
+#   anthropic          only if LLM_PROVIDER=anthropic
+#   psycopg[binary]    retrieval is in-process over the frozen KB; no database
+#   pgvector           add only when dense retrieval is unblocked and measured

@@ -1,0 +1,25 @@
+# Optional — dense and hybrid retrieval only.
+#
+#     pip install -r requirements-dense.txt
+#
+# ~2.5 GB. Do not install this unless you are actually working on dense
+# retrieval. Nothing else in the project imports it: src/embeddings/provider.py
+# imports sentence_transformers lazily inside a method, so the package's
+# absence raises a clean ModelUnavailableError rather than breaking startup,
+# and the three tests that need it skip themselves.
+#
+# STATUS: dense and hybrid retrieval are IMPLEMENTED, UNIT-TESTED AND
+# UNMEASURED. huggingface.co returned HTTP 403 from our sandbox's egress proxy
+# (confirmed twice, in two separate environments), so no embedding weights
+# could ever be downloaded. See docs/BLOCKERS.md.
+#
+# On an unrestricted machine these should install and the weights should
+# download normally. If you get them working, the first thing to run is:
+#
+#     python experiments/retrieval_baseline_final.py
+#
+# and the resulting numbers are a genuine addition to the project — they are
+# currently the largest unmeasured claim we have.
+
+sentence-transformers>=3.0
+torch>=2.0

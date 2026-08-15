@@ -70,7 +70,10 @@ def test_local_provider_raises_model_unavailable_when_load_fails(monkeypatch):
     blocked, weights not cached, corrupted cache, etc.) by making the real
     SentenceTransformer constructor raise — independent of this machine's
     actual Hugging Face cache or network state."""
-    import sentence_transformers
+    sentence_transformers = pytest.importorskip(
+        "sentence_transformers",
+        reason="optional: pip install -r requirements-dense.txt (~2.5 GB, dense retrieval only)",
+    )
 
     class _BoomSentenceTransformer:
         def __init__(self, *args, **kwargs):
@@ -84,7 +87,10 @@ def test_local_provider_raises_model_unavailable_when_load_fails(monkeypatch):
 
 
 def test_local_provider_is_available_returns_false_when_load_fails(monkeypatch):
-    import sentence_transformers
+    sentence_transformers = pytest.importorskip(
+        "sentence_transformers",
+        reason="optional: pip install -r requirements-dense.txt (~2.5 GB, dense retrieval only)",
+    )
 
     class _BoomSentenceTransformer:
         def __init__(self, *args, **kwargs):
@@ -101,7 +107,10 @@ def test_local_provider_is_available_returns_true_when_load_succeeds(monkeypatch
     cached locally, successful download, etc.), is_available() must not
     falsely report False. Simulated deterministically, without touching
     a real cache or network."""
-    import sentence_transformers
+    sentence_transformers = pytest.importorskip(
+        "sentence_transformers",
+        reason="optional: pip install -r requirements-dense.txt (~2.5 GB, dense retrieval only)",
+    )
 
     class _FakeSentenceTransformer:
         def __init__(self, *args, **kwargs):
