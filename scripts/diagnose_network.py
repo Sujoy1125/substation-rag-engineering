@@ -79,10 +79,24 @@ def main() -> int:
         return 1
     print(f"{OK}OPENAI_API_KEY present ({len(key)} chars, starts {key[:7]}…)")
 
-    base = os.getenv("OPENAI_BASE_URL", "")
-    if base:
-        print(f"{WARN}OPENAI_BASE_URL is set to {base!r}")
-        print("       Requests go there, NOT to api.openai.com. Unset it unless")
+    # An empty-but-present OPENAI_BASE_URL is the trap: the SDK reads this
+    # variable itself and treats "" as a base URL, producing a request to a
+    # URL with no scheme and an APIConnectionError that reads like a firewall.
+    if "OPENAI_BASE_URL" in os.environ:
+        base = os.environ["OPENAI_BASE_URL"]
+        if not base.strip():
+            print(f"{BAD}OPENAI_BASE_URL is set but EMPTY")
+            print("       The OpenAI SDK reads this variable directly and treats an")
+            print("       empty string as a base URL, building a request to a URL")
+            print("       with no scheme. It surfaces as 'Connection error', which")
+            print("       looks like a network fault and is not one.")
+            print("       Fix: delete or comment out the OPENAI_BASE_URL line in .env")
+            return 1
+        if not base.startswith(("http://", "https://")):
+            print(f"{BAD}OPENAI_BASE_URL = {base!r} has no http:// or https:// scheme")
+            return 1
+        print(f"{WARN}OPENAI_BASE_URL = {base!r}")
+        print("       Requests go there, NOT to api.openai.com. Remove it unless")
         print("       you are deliberately using a proxy or local model.")
 
     # --- key hygiene --------------------------------------------------

@@ -450,6 +450,41 @@ def test_existing_environment_wins_over_dotenv(tmp_path, monkeypatch):
     assert os.environ["OPENAI_API_KEY"] == "sk-already-exported"
 
 
+def test_empty_values_are_skipped_not_exported_as_empty_strings(tmp_path, monkeypatch):
+    """`KEY=` means "not configured". Exporting it as "" means "configured, to
+    nothing" — and to the OpenAI SDK, an empty OPENAI_BASE_URL is a base URL,
+    producing a schemeless request and a bare "Connection error" that looks
+    exactly like a firewall. Copying .env.example was enough to trigger it."""
+    from src.generation.llm import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text("OPENAI_API_KEY=sk-real\nOPENAI_BASE_URL=\nEMBEDDING_PROVIDER=\n")
+    for var in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "EMBEDDING_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
+
+    load_dotenv(env)
+    assert os.environ["OPENAI_API_KEY"] == "sk-real"
+    assert "OPENAI_BASE_URL" not in os.environ
+    assert "EMBEDDING_PROVIDER" not in os.environ
+
+
+def test_shipped_env_example_has_no_blank_optional_keys():
+    """The template must not be able to poison a .env just by being copied."""
+    from src.generation.llm import REPO_ROOT
+
+    text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        # OPENAI_API_KEY is intentionally blank: the user must fill it in, and
+        # an empty key is caught with a clear message rather than a URL fault.
+        if key.strip() == "OPENAI_API_KEY":
+            continue
+        assert value.strip(), f"{key.strip()} is blank in .env.example; comment it out instead"
+
+
 def test_missing_dotenv_is_not_an_error(tmp_path):
     from src.generation.llm import load_dotenv
 

@@ -43,6 +43,15 @@ def load_dotenv(path: str | Path = DEFAULT_ENV_PATH) -> bool:
     Existing environment variables always win, so an explicitly exported value
     is never clobbered by the file. Avoids a python-dotenv dependency for what
     is four lines of parsing.
+
+    **Empty values are skipped, not exported as empty strings.** `KEY=` in a
+    .env means "not configured", but exporting it as "" means "configured, to
+    nothing" — and those are very different to a library reading the variable.
+    The OpenAI SDK reads OPENAI_BASE_URL itself: unset means "use the default
+    endpoint", empty string means "use this base URL", producing a request to
+    a URL with no scheme and a bare `APIConnectionError: Connection error`
+    that looks for all the world like a firewall. Copying .env.example — which
+    ships optional keys blank — was enough to trigger it.
     """
     env_path = Path(path)
     if not env_path.exists():
@@ -53,7 +62,7 @@ def load_dotenv(path: str | Path = DEFAULT_ENV_PATH) -> bool:
             continue
         key, _, value = line.partition("=")
         key, value = key.strip(), value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if key and value and key not in os.environ:
             os.environ[key] = value
     return True
 
