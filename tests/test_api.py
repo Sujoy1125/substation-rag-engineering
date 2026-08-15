@@ -262,6 +262,17 @@ def test_evidence_returns_the_full_record_including_sentinels():
     assert body["notes"] == "NOT VERIFIED"
 
 
+def test_root_sends_a_browser_to_the_docs_instead_of_404ing():
+    """Opening the root URL is the first thing anyone does. A 404 there reads
+    as a broken service."""
+    c = client_for(build_service([GOOD_REPLY]))
+
+    r = c.get("/", follow_redirects=False)
+    assert r.status_code in (301, 302, 307)
+    assert r.headers["location"] == "/docs"
+    assert c.get("/", follow_redirects=True).status_code == 200
+
+
 def test_unknown_chunk_id_is_404():
     c = client_for(build_service([GOOD_REPLY]))
     assert c.get("/evidence/NOPE-C9999").status_code == 404

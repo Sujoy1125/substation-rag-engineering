@@ -241,7 +241,7 @@ def create_app(service: RAGService):
     imports it constantly.
     """
     from fastapi import FastAPI, HTTPException
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, RedirectResponse
 
     app = FastAPI(
         title="Substation O&M Assistant",
@@ -254,6 +254,17 @@ def create_app(service: RAGService):
         ),
     )
     app.state.service = service
+
+    @app.get("/", include_in_schema=False)
+    def index():
+        """Send a browser to the interactive docs.
+
+        The first thing anyone does with a new service is open its root in a
+        browser. Answering that with 404 reads as "broken" when the service is
+        fine — and during a demo nobody has time to work out that the real
+        entry point was /docs all along.
+        """
+        return RedirectResponse(url="/docs")
 
     @app.get("/health")
     def health():
