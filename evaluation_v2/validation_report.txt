@@ -1,0 +1,12 @@
+============================================================
+EVALUATION_V2 VALIDATION REPORT
+============================================================
+Answerable questions:   44
+Unanswerable questions: 7
+Ambiguous questions:    6
+Total:                  57
+
+ERRORS: 0
+WARNINGS: 0
+
+RESULT: PASS

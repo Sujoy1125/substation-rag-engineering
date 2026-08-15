@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# Secrets / local configuration
+.env
+
+# Large raw source documents
+KB_v1/documents/*.pdf
+KB_v1.1/KB_v1.1_final/documents/*.pdf
+
+# Benchmark-generated JSON
+experiments/*.json
+!experiments/.gitkeep
+
+src/embeddings/*.backup
