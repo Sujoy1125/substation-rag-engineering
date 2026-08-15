@@ -1,5 +1,17 @@
 # Retrieval Baseline — Phase 3 + Phase 4
 
+> **SUPERSEDED — historical record only.**
+> This document describes an earlier state in which the document-diversity
+> reranker was part of the default pipeline, measured against **KB_v1** and the
+> D09-only benchmark. Neither is current.
+>
+> The authoritative retrieval baseline is **[`RETRIEVAL_BASELINE_V2.md`](RETRIEVAL_BASELINE_V2.md)**:
+> `BM25 → EquipmentAwareRetrieverV2 → Top-K`, measured on `KB_v1.1` against both
+> D09 (20 questions) and `evaluation_v2` (44 questions, D01–D08), with no
+> diversity reranker.
+>
+> Kept unedited below so the earlier numbers remain auditable.
+
 All numbers below are measured against the frozen `KB_v1/rag_test_55.xlsx`
 `20_Answerable` sheet, 1,744 chunks loaded from `KB_v1/knowledge_chunks.xlsx`.
 Hit definition: retrieved chunk's `Document ID` matches gold `Document ID
