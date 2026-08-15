@@ -455,6 +455,160 @@ def test_openai_client_supplies_its_own_http_client(monkeypatch):
     assert "http_client" in captured, "SDK was left to build its own client"
 
 
+# --------------------------------------------------------------------------
+# the two kinds of 429
+# --------------------------------------------------------------------------
+
+
+class FakeHeaders(dict):
+    """httpx-style headers: case-insensitive .get()."""
+
+    def get(self, key, default=None):
+        return super().get(key.lower(), default)
+
+
+def api_error(message: str, status=None, code=None, headers=None):
+    """An exception shaped like the ones the SDKs actually raise."""
+    e = Exception(message)
+    if status is not None:
+        e.status_code = status
+    if code is not None:
+        e.body = {"error": {"code": code, "message": message}}
+    if headers is not None:
+        e.response = type("R", (), {"status_code": status, "headers": FakeHeaders(headers)})()
+    return e
+
+
+def test_billing_429_and_rate_limit_429_are_told_apart():
+    """Both are 429. One is permanent until someone pays; the other clears in
+    seconds. Conflating them is how a run gets abandoned for a billing problem
+    that does not exist."""
+    from src.generation.llm import classify_api_error
+
+    empty_account = api_error(
+        "Error code: 429 - You exceeded your current quota, please check your "
+        "plan and billing details",
+        status=429,
+        code="insufficient_quota",
+    )
+    too_fast = api_error(
+        "Error code: 429 - Rate limit reached for gpt-4o-mini, please try again in 6s",
+        status=429,
+        code="rate_limit_exceeded",
+    )
+
+    assert classify_api_error(empty_account) == "quota"
+    assert classify_api_error(too_fast) == "rate_limit"
+
+
+def test_azure_token_rate_limit_is_a_rate_limit():
+    """Azure phrases it differently from OpenAI and never says 'rate_limit_exceeded'."""
+    from src.generation.llm import classify_api_error
+
+    e = api_error(
+        "Requests to the ChatCompletions_Create Operation under Azure OpenAI API "
+        "have exceeded token rate limit of your current OpenAI S0 pricing tier. "
+        "Please retry after 34 seconds.",
+        status=429,
+    )
+    assert classify_api_error(e) == "rate_limit"
+
+
+def test_unrecognised_429_is_treated_as_a_rate_limit_not_a_billing_failure():
+    """Deliberate asymmetry: guessing 'rate limit' costs a minute of backoff,
+    guessing 'billing' tells someone their account is empty when it is not."""
+    from src.generation.llm import classify_api_error
+
+    assert classify_api_error(api_error("Error code: 429", status=429)) == "rate_limit"
+
+
+def test_rate_limit_message_does_not_tell_the_user_to_pay():
+    from src.generation.llm import explain_api_error
+
+    msg = explain_api_error(api_error("429 rate limit reached", status=429))
+    assert "billing" not in msg.lower()
+    assert "no credit" not in msg.lower()
+    assert "rate limit" in msg.lower()
+
+
+def test_retry_after_header_is_preferred_over_our_own_backoff():
+    from src.generation.llm import RetryPolicy, retry_after_seconds
+
+    e = api_error("429", status=429, headers={"retry-after": "7"})
+    assert retry_after_seconds(e) == 7.0
+    assert RetryPolicy().delay_for(1, retry_after_seconds(e)) == 7.0
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("6m0s", 360.0), ("1.5s", 1.5), ("20ms", 0.02), ("2", 2.0), ("soon", None)],
+)
+def test_duration_headers_parse(raw, expected):
+    from src.generation.llm import retry_after_seconds
+
+    assert retry_after_seconds(api_error("429", 429, headers={"retry-after": raw})) == expected
+
+
+def test_rate_limits_are_retried_and_the_call_eventually_succeeds():
+    from src.generation.llm import RetryPolicy, call_with_retry
+
+    attempts, slept = [], []
+
+    def flaky():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise api_error("429 rate limit reached", status=429, code="rate_limit_exceeded")
+        return "ok"
+
+    out = call_with_retry(flaky, RetryPolicy(max_attempts=5, base_delay=2.0), sleep=slept.append)
+    assert out == "ok"
+    assert len(attempts) == 3
+    assert slept == [2.0, 4.0]  # exponential, deterministic
+
+
+def test_a_quota_failure_is_never_retried():
+    """Retrying an empty account just multiplies the wait before the person
+    sees the one message that would have helped them."""
+    from src.generation.llm import RetryPolicy, call_with_retry
+
+    attempts, slept = [], []
+
+    def broke():
+        attempts.append(1)
+        raise api_error("429 You exceeded your current quota", 429, code="insufficient_quota")
+
+    with pytest.raises(Exception):
+        call_with_retry(broke, RetryPolicy(max_attempts=5), sleep=slept.append)
+    assert len(attempts) == 1
+    assert slept == []
+
+
+def test_backoff_is_capped():
+    from src.generation.llm import RetryPolicy
+
+    policy = RetryPolicy(base_delay=2.0, max_delay=60.0)
+    assert policy.delay_for(10) == 60.0
+    assert policy.delay_for(1, suggested=900.0) == 60.0
+
+
+def test_exhausted_retries_surface_the_rate_limit_not_a_billing_message():
+    from src.generation.llm import RetryPolicy, call_with_retry, explain_api_error
+
+    def always():
+        raise api_error("429 rate limit reached", 429, code="rate_limit_exceeded")
+
+    with pytest.raises(Exception) as excinfo:
+        call_with_retry(always, RetryPolicy(max_attempts=2), sleep=lambda _: None)
+    assert "rate limit" in explain_api_error(excinfo.value).lower()
+
+
+def test_model_404_mentions_the_azure_deployment_name_trap():
+    from src.generation.llm import explain_api_error
+
+    msg = explain_api_error(api_error("Error code: 404 - The model does not exist", status=404))
+    assert "OPENAI_MODEL" in msg and "deployment" in msg.lower()
+
+
 def test_scripted_client_is_rejected_on_reported_result_paths():
     with pytest.raises(MockClientInEvaluationError):
         assert_real_client(ScriptedClient(["{}"]))

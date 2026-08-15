@@ -100,46 +100,235 @@ class LLMClient(ABC):
         """Cheap, side-effect-free readiness check. Must not make a paid call."""
         return self.availability_error() is None
 
+    def _announce_wait(self, attempt: int, delay: float, e: BaseException) -> None:
+        """Say out loud that we are waiting on a rate limit.
+
+        A silent 60-second sleep in the middle of a 57-question run is
+        indistinguishable from a hang, and the natural response to a hang is
+        Ctrl-C — which throws away the work already done.
+        """
+        print(
+            f"    rate limited; waiting {delay:.0f}s then retrying "
+            f"(attempt {attempt})",
+            flush=True,
+        )
+
+
+RATE_LIMIT_WORDS = (
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "requests per min",
+    "tokens per min",
+    "too many requests",
+    "retry after",
+    "try again in",
+    "please retry",
+)
+QUOTA_WORDS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "check your plan and billing",
+    "billing",
+    "no credit",
+    "quota exceeded",
+)
+
+
+def _error_blob(e: BaseException) -> str:
+    """Everything a provider exception knows about itself, lowercased.
+
+    Status lives in different places across SDK versions and providers, and the
+    machine-readable code (`insufficient_quota` vs `rate_limit_exceeded`) is the
+    part that actually distinguishes the two 429s — so gather all of it rather
+    than matching on the human-readable message alone.
+    """
+    parts = [str(e)]
+    status = getattr(e, "status_code", None) or getattr(
+        getattr(e, "response", None), "status_code", None
+    )
+    parts.append(str(status))
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            parts.append(str(err.get("code") or ""))
+            parts.append(str(err.get("type") or ""))
+    parts.append(str(getattr(e, "code", "") or ""))
+    return " ".join(parts).lower()
+
+
+def classify_api_error(e: BaseException) -> str:
+    """Name the failure: rate_limit | quota | auth | model | connection | unknown.
+
+    The distinction that matters is between the two kinds of 429. An empty
+    balance and a per-minute cap return the same status code and mean opposite
+    things: the first is permanent until someone pays, the second clears by
+    itself in a few seconds. Treating them alike is how a run gets abandoned
+    with a billing message while the only real problem was going too fast.
+
+    An unrecognised 429 is classified as a rate limit, deliberately. The cost of
+    guessing wrong that way is a minute of backoff before the real message
+    appears; guessing the other way tells someone their account is out of money
+    when it is not.
+    """
+    blob = _error_blob(e)
+    is_429 = "429" in blob or "too many requests" in blob
+
+    if is_429 or "quota" in blob:
+        if any(w in blob for w in QUOTA_WORDS):
+            return "quota"
+        if any(w in blob for w in RATE_LIMIT_WORDS) or is_429:
+            return "rate_limit"
+        return "quota"
+    if "401" in blob or "invalid_api_key" in blob or "unauthorized" in blob:
+        return "auth"
+    if "404" in blob and "model" in blob:
+        return "model"
+    if "connection" in blob or "timeout" in blob or "timed out" in blob:
+        return "connection"
+    return "unknown"
+
 
 def explain_api_error(e: BaseException) -> str:
     """Turn a provider exception into something that names the actual problem.
 
     An API failure and a network failure are different problems with different
     fixes, and "request failed" sends the reader to the firewall regardless.
-    A 429 in particular is easy to misread: the key is valid, the network is
-    fine, the account simply has no credit — and no amount of debugging
-    connectivity will change that.
     """
     msg = str(e)
-    status = getattr(e, "status_code", None)
-    blob = f"{status} {msg}".lower()
+    kind = classify_api_error(e)
 
-    if "429" in blob or "quota" in blob or "insufficient_quota" in blob:
+    if kind == "quota":
         return (
-            "OpenAI returned 429 — the API key is valid but the account has no "
-            "credit or has hit its quota. This is a billing state, not a network "
-            "or code problem; nothing in this repository can work around it.\n"
-            "  Add credit: https://platform.openai.com/settings/organization/billing\n"
-            "  Then re-run. Note that listing models is free, so a key can pass "
-            "every connectivity check and still fail on the first generation."
+            "the API returned 429 with a quota/billing code — the key is valid but "
+            "the account has no credit. This is a billing state, not a network or "
+            "code problem; nothing in this repository can work around it.\n"
+            "  OpenAI billing: https://platform.openai.com/settings/organization/billing\n"
+            "  Note that listing models is free, so a key can pass every "
+            "connectivity check and still fail on the first generation."
         )
-    if "401" in blob or "invalid_api_key" in blob or "unauthorized" in blob:
+    if kind == "rate_limit":
         return (
-            "OpenAI returned 401 — the key is rejected. Revoked, mistyped, or "
+            "the API returned 429 as a RATE LIMIT — requests are arriving faster "
+            "than the tier allows. The account is fine and the key is fine.\n"
+            f"  Provider said: {msg}\n"
+            "  This is retried automatically with backoff; seeing it here means "
+            "the retries were also refused. Free and student tiers cap requests "
+            "per minute and tokens per minute, so run in smaller batches "
+            "(--limit), or raise the deployment's quota."
+        )
+    if kind == "auth":
+        return (
+            "the API returned 401 — the key is rejected. Revoked, mistyped, or "
             "belongs to a different account.\n"
-            "  New key: https://platform.openai.com/api-keys"
+            "  New OpenAI key: https://platform.openai.com/api-keys\n"
+            "  If you are pointing at Azure or another OpenAI-compatible endpoint, "
+            "check OPENAI_BASE_URL matches the key you are using."
         )
-    if "404" in blob and "model" in blob:
+    if kind == "model":
         return (
-            f"OpenAI returned 404 for the model. Check OPENAI_MODEL in .env is a "
-            f"model your account can use."
+            "the API returned 404 for the model. Check OPENAI_MODEL in .env.\n"
+            "  On Azure this must be your DEPLOYMENT name, not the model family name."
         )
-    if "connection" in blob or "timeout" in blob or "timed out" in blob:
+    if kind == "connection":
         return (
             f"could not reach the API: {msg}\n"
             "  Diagnose the layer: python scripts/diagnose_network.py"
         )
-    return f"OpenAI request failed: {msg}"
+    return f"the API request failed: {msg}"
+
+
+def retry_after_seconds(e: BaseException) -> Optional[float]:
+    """The provider's own instruction on when to try again, if it gave one.
+
+    Preferred over any delay we invent: the server knows when its window
+    resets. Values appear either as plain seconds or in Go-style duration
+    notation ("6m0s", "1.5s", "20ms"), depending on provider.
+    """
+    headers = getattr(getattr(e, "response", None), "headers", None)
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    for name in ("retry-after", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"):
+        raw = headers.get(name)
+        if not raw:
+            continue
+        parsed = _parse_duration(str(raw).strip())
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_duration(text: str) -> Optional[float]:
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    total, number, seen = 0.0, "", False
+    units = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch.isdigit() or ch == ".":
+            number += ch
+            i += 1
+            continue
+        unit = text[i : i + 2] if text[i : i + 2] in units else ch
+        if unit not in units or not number:
+            return None
+        total += float(number) * units[unit]
+        number, seen = "", True
+        i += len(unit)
+    return total if seen and not number else None
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """How hard to try again after a rate limit.
+
+    Applies to rate limits ONLY. A quota failure, a bad key and a missing model
+    are all permanent within the run, and retrying them just multiplies the
+    wait before the person sees the message that would have helped them.
+
+    No jitter: calls here are sequential from a single client, so there is no
+    herd to disperse, and a deterministic schedule keeps runs reproducible.
+    """
+
+    max_attempts: int = 5
+    base_delay: float = 2.0
+    max_delay: float = 60.0
+
+    def delay_for(self, attempt: int, suggested: Optional[float] = None) -> float:
+        if suggested is not None and suggested > 0:
+            return min(suggested, self.max_delay)
+        return min(self.base_delay * (2 ** (attempt - 1)), self.max_delay)
+
+
+DEFAULT_RETRY_POLICY = RetryPolicy()
+
+
+def call_with_retry(fn, policy: RetryPolicy, sleep=None, on_wait=None):
+    """Run `fn`, retrying only rate limits, with backoff.
+
+    `sleep` and `on_wait` are injectable so tests can prove the schedule
+    without spending the wall-clock time it describes.
+    """
+    import time as _time
+
+    sleep = sleep or _time.sleep
+    last: BaseException | None = None
+    for attempt in range(1, policy.max_attempts + 1):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - re-raised below
+            last = e
+            if classify_api_error(e) != "rate_limit" or attempt == policy.max_attempts:
+                raise
+            delay = policy.delay_for(attempt, retry_after_seconds(e))
+            if on_wait:
+                on_wait(attempt, delay, e)
+            sleep(delay)
+    raise last  # pragma: no cover - loop always returns or raises
 
 
 def assert_real_client(client: LLMClient) -> None:
@@ -174,6 +363,7 @@ class OpenAIClient(LLMClient):
         base_url: str | None = None,
         request_json_mode: bool = True,
         timeout: float = 60.0,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.model = model or os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
         self._api_key = api_key or os.getenv("OPENAI_API_KEY") or ""
@@ -182,6 +372,7 @@ class OpenAIClient(LLMClient):
         self.max_tokens = max_tokens
         self.request_json_mode = request_json_mode
         self.timeout = timeout
+        self.retry_policy = retry_policy or DEFAULT_RETRY_POLICY
         self._client = None
 
     def _ensure_client(self):
@@ -262,16 +453,23 @@ class OpenAIClient(LLMClient):
         if self.request_json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
+        def _send():
+            return call_with_retry(
+                lambda: client.chat.completions.create(**kwargs),
+                self.retry_policy,
+                on_wait=self._announce_wait,
+            )
+
         t0 = time.perf_counter()
         try:
-            resp = client.chat.completions.create(**kwargs)
+            resp = _send()
         except Exception as e:
             # One retry without json mode: some models reject response_format.
             # Any other failure is surfaced, not swallowed.
             if self.request_json_mode and "response_format" in str(e):
                 kwargs.pop("response_format", None)
                 try:
-                    resp = client.chat.completions.create(**kwargs)
+                    resp = _send()
                 except Exception as e2:
                     raise LLMUnavailableError(explain_api_error(e2)) from e2
             else:
@@ -303,12 +501,14 @@ class AnthropicClient(LLMClient):
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         timeout: float = 60.0,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.model = model or os.getenv("ANTHROPIC_MODEL") or "claude-sonnet-4-5"
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY") or ""
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
+        self.retry_policy = retry_policy or DEFAULT_RETRY_POLICY
         self._client = None
 
     def availability_error(self) -> Optional[str]:
@@ -352,15 +552,19 @@ class AnthropicClient(LLMClient):
 
         t0 = time.perf_counter()
         try:
-            resp = self._client.messages.create(
-                model=self.model,
-                system=system,
-                messages=turns,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
+            resp = call_with_retry(
+                lambda: self._client.messages.create(
+                    model=self.model,
+                    system=system,
+                    messages=turns,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                ),
+                self.retry_policy,
+                on_wait=self._announce_wait,
             )
         except Exception as e:
-            raise LLMUnavailableError(f"Anthropic request failed: {e}") from e
+            raise LLMUnavailableError(explain_api_error(e)) from e
         latency_ms = (time.perf_counter() - t0) * 1000
 
         text = "".join(getattr(b, "text", "") for b in resp.content)
