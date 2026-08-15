@@ -6,15 +6,23 @@
 least six distinct failures, and the fix is different for each. This walks the
 layers in order and stops being useful only where it actually breaks:
 
-    1. .env loaded, key present
-    2. proxy environment variables
-    3. DNS      does api.openai.com resolve?
-    4. TCP      can we open port 443?
-    5. TLS      does the handshake succeed, and WHO signed the certificate?
-    6. HTTP     does an unauthenticated request reach the API?
-    7. API      does the key work?
+    1. config    .env loaded, key present
+    2. key       any invisible characters that an HTTP header cannot carry?
+    3. proxy     proxy environment variables
+    4. DNS       does api.openai.com resolve?
+    5. TCP       can we open port 443?
+    6. TLS       does the handshake succeed, and WHO signed the certificate?
+    7. HTTP      does an UNauthenticated request reach the API?
+    8. auth      does an authenticated request work via raw httpx...
+    9. SDK       ...and via the OpenAI SDK?
 
-Step 5 is the one that catches the failure most people miss. Campus and
+Steps 8 and 9 are separate on purpose. If raw httpx succeeds with the same key
+and the SDK does not, then the key, the route and TLS are all fine and the
+fault is in the SDK's own HTTP stack — a completely different fix from
+anything network-related. `APIConnectionError` is a wrapper; step 9 unwraps
+the cause chain, because the wrapper's name is never the actual failure.
+
+The TLS step is the one that catches the failure most people miss. Campus and
 corporate networks frequently intercept HTTPS with their own certificate
 authority. Browsers accept it because the CA is installed in the OS trust
 store; Python does not, because it ships its own via certifi. The symptom is
@@ -45,8 +53,13 @@ BAD = "  FAIL "
 WARN = "  WARN "
 
 
-def step(n: int, title: str) -> None:
-    print(f"\n[{n}] {title}")
+_step_no = [0]
+
+
+def step(title: str) -> None:
+    """Auto-numbered so steps can be reordered without the numbers drifting."""
+    _step_no[0] += 1
+    print(f"\n[{_step_no[0]}] {title}")
 
 
 def main() -> int:
@@ -54,8 +67,8 @@ def main() -> int:
     print("LLM CONNECTIVITY DIAGNOSTIC")
     print("=" * 70)
 
-    # --- 1. configuration ------------------------------------------------
-    step(1, "Configuration (.env)")
+    # --- configuration ------------------------------------------------
+    step("Configuration (.env)")
     found = load_dotenv()
     print(f"{OK if found else WARN}.env file: {'loaded' if found else 'NOT FOUND at ' + str(REPO_ROOT / '.env')}")
 
@@ -72,8 +85,33 @@ def main() -> int:
         print("       Requests go there, NOT to api.openai.com. Unset it unless")
         print("       you are deliberately using a proxy or local model.")
 
-    # --- 2. proxies ------------------------------------------------------
-    step(2, "Proxy environment")
+    # --- key hygiene --------------------------------------------------
+    # A key that survived copy-paste through a browser, a chat window and a
+    # text editor can carry characters that are invisible on screen but fatal
+    # in an HTTP header. Checked before blaming the network.
+    step("API key hygiene")
+    problems = []
+    if key != key.strip():
+        problems.append("leading/trailing whitespace")
+    non_ascii = [(i, ch) for i, ch in enumerate(key) if ord(ch) > 126 or ord(ch) < 32]
+    if non_ascii:
+        problems.append(
+            "non-ASCII or control characters at positions "
+            + ", ".join(f"{i} (U+{ord(c):04X})" for i, c in non_ascii[:5])
+        )
+    if any(q in key for q in ('"', "'", "“", "”")):
+        problems.append("quote characters inside the key")
+    if problems:
+        for p in problems:
+            print(f"{BAD}{p}")
+        print("       An HTTP header cannot carry these. Re-copy the key from")
+        print("       https://platform.openai.com/api-keys straight into .env,")
+        print("       with no quotes and nothing after it on the line.")
+        return 1
+    print(f"{OK}clean: ASCII only, no stray whitespace or quotes")
+
+    # --- proxies ------------------------------------------------------
+    step("Proxy environment")
     proxies = {k: v for k, v in os.environ.items() if k.lower() in
                ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
     if proxies:
@@ -84,8 +122,8 @@ def main() -> int:
     else:
         print(f"{OK}no proxy variables set (direct connection expected)")
 
-    # --- 3. DNS ----------------------------------------------------------
-    step(3, f"DNS resolution of {HOST}")
+    # --- DNS ----------------------------------------------------------
+    step(f"DNS resolution of {HOST}")
     try:
         addrs = sorted({ai[4][0] for ai in socket.getaddrinfo(HOST, PORT, proto=socket.IPPROTO_TCP)})
         print(f"{OK}resolves to {', '.join(addrs[:4])}")
@@ -95,8 +133,8 @@ def main() -> int:
         print("       (hotel/campus login page) is not intercepting requests.")
         return 1
 
-    # --- 4. TCP ----------------------------------------------------------
-    step(4, f"TCP connection to {HOST}:{PORT}")
+    # --- TCP ----------------------------------------------------------
+    step(f"TCP connection to {HOST}:{PORT}")
     try:
         with socket.create_connection((HOST, PORT), timeout=10):
             print(f"{OK}port {PORT} is open")
@@ -111,8 +149,8 @@ def main() -> int:
         print("       Something actively rejected the connection.")
         return 1
 
-    # --- 5. TLS + certificate issuer -------------------------------------
-    step(5, "TLS handshake and certificate issuer")
+    # --- TLS + certificate issuer -------------------------------------
+    step("TLS handshake and certificate issuer")
     try:
         ctx = ssl.create_default_context()
         with socket.create_connection((HOST, PORT), timeout=10) as sock:
@@ -150,8 +188,8 @@ def main() -> int:
         print(f"{BAD}TLS failed: {type(e).__name__}: {e}")
         return 1
 
-    # --- 6. HTTP reachability (no auth) ----------------------------------
-    step(6, "HTTP request to the API (no key — 401 is the success case)")
+    # --- HTTP reachability (no auth) ----------------------------------
+    step("HTTP request to the API (no key — 401 is the success case)")
     try:
         import httpx
 
@@ -168,24 +206,65 @@ def main() -> int:
         print("       TLS worked but the HTTP request did not complete.")
         return 1
 
-    # --- 7. the key ------------------------------------------------------
-    step(7, "Authenticated request with your key")
+    # --- authenticated request, bypassing the SDK ---------------------
+    # Separates "the network rejects authenticated traffic" from "the SDK
+    # cannot make the call". Step 6 already proved unauthenticated requests
+    # get through, so a failure here is about the request, not the route.
+    step("Authenticated request via raw httpx (bypasses the OpenAI SDK)")
+    raw_ok = False
+    try:
+        import httpx
+
+        r = httpx.get(
+            f"https://{HOST}/v1/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=20,
+        )
+        if r.status_code == 200:
+            print(f"{OK}200 — the key works and the network allows it")
+            raw_ok = True
+        elif r.status_code == 401:
+            print(f"{BAD}401 Unauthorized — the key is rejected by OpenAI")
+            print("       Revoked, mistyped, or from a different account.")
+            print("       Generate a new one: https://platform.openai.com/api-keys")
+            return 1
+        elif r.status_code == 429:
+            print(f"{BAD}429 — the key is valid but out of quota/credit")
+            print("       https://platform.openai.com/settings/organization/billing")
+            return 1
+        else:
+            print(f"{WARN}status {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"{BAD}{type(e).__name__}: {str(e)[:200]}")
+        print("       Even a raw authenticated request fails, so this is the")
+        print("       network refusing authenticated traffic, not the SDK.")
+        return 1
+
+    # --- the SDK itself ------------------------------------------------
+    step("Authenticated request via the OpenAI SDK")
     try:
         from openai import OpenAI
 
         client = OpenAI(api_key=key, timeout=20)
         models = client.models.list()
         names = [m.id for m in models.data][:3]
-        print(f"{OK}key works — {len(models.data)} models available, e.g. {', '.join(names)}")
+        print(f"{OK}SDK works — {len(models.data)} models, e.g. {', '.join(names)}")
     except Exception as e:
-        msg = str(e)
-        print(f"{BAD}{type(e).__name__}: {msg[:200]}")
-        if "401" in msg or "invalid_api_key" in msg:
-            print("       The key is wrong or revoked. Generate a new one at")
-            print("       https://platform.openai.com/api-keys")
-        elif "429" in msg or "quota" in msg.lower():
-            print("       The key is valid but has no credit. Add billing at")
-            print("       https://platform.openai.com/settings/organization/billing")
+        print(f"{BAD}{type(e).__name__}: {str(e)[:200]}")
+        # openai wraps the real failure; the wrapper name is never the cause.
+        cause, depth = e.__cause__ or e.__context__, 0
+        while cause is not None and depth < 6:
+            print(f"       caused by: {type(cause).__name__}: {str(cause)[:200]}")
+            cause = cause.__cause__ or cause.__context__
+            depth += 1
+        if raw_ok:
+            print()
+            print("       Raw httpx with the same key succeeded, so the key, the")
+            print("       network and TLS are all fine — the SDK's own HTTP client")
+            print("       is what fails. Usually one of:")
+            print("         - an old/conflicting httpx: pip install -U openai httpx")
+            print("         - a stale openai version:   pip show openai")
+            print("         - antivirus or endpoint security filtering the process")
         return 1
 
     print("\n" + "=" * 70)
