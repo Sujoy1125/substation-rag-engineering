@@ -282,6 +282,7 @@ python scripts/diagnose_network.py                 # if generation fails
 | [docs/GENERATION_LAYER.md](docs/GENERATION_LAYER.md) | Generation design and what is explicitly not verified |
 | [docs/CONFIDENCE_LAYER.md](docs/CONFIDENCE_LAYER.md) | The eight signals, calibration design, why the weights are empty |
 | [docs/EVALUATION_PLAN.md](docs/EVALUATION_PLAN.md) | Question classes, headline metrics, judge protocol, the split |
+| [docs/DATA_STORE.md](docs/DATA_STORE.md) | Why there is no database, the designed pgvector schema, and its activation triggers |
 | [docs/BLOCKERS.md](docs/BLOCKERS.md) | The dense-retrieval blocker |
 
 ---
@@ -312,8 +313,13 @@ python scripts/diagnose_network.py                 # if generation fails
 10. **`source_authority` is near-constant** (1,733 of 1,745 chunks are HIGH), so
     calibration will likely give it little weight. A signal that turns out not to
     matter is a finding, not a bug.
-11. **No database.** Retrieval is in-process over the frozen knowledge base.
-    PostgreSQL and pgvector are not required by the current pipeline.
+11. **No database — by decision, not omission.** Retrieval is in-process over
+    the frozen knowledge base: 510 ms to build the index, 1.8 ms median per
+    query. pgvector's purpose is storing embeddings we cannot yet generate, and
+    moving a frozen, hash-verified corpus into a mutable table would trade
+    reproducibility for infrastructure we do not use. The integration is
+    designed and its activation triggers are stated in
+    [docs/DATA_STORE.md](docs/DATA_STORE.md).
 
 ---
 
