@@ -1,3 +1,4 @@
+
 """Experiment A: D09 regression check, baseline vs EquipmentAwareRetrieverV2.
 
 Does not modify retrievers.py, equipment_aware.py, document_diversity.py,
@@ -19,7 +20,8 @@ from src.retrieval.equipment_aware_v2 import EquipmentAwareRetrieverV2
 from src.retrieval.document_diversity import DocumentDiversityReranker
 from src.retrieval.benchmark import run_benchmark, print_result
 
-KB = Path(__file__).resolve().parents[1] / "KB_v1.1_extracted" / "KB_v1.1_final"
+# KB = Path(__file__).resolve().parents[1] / "KB_v1.1_extracted" / "KB_v1.1_final"
+KB = Path(__file__).resolve().parents[1] / "KB_v1.1" / "KB_v1.1_final"
 
 chunks, load_report = load_chunks(str(KB / "knowledge_chunks.xlsx"))
 assert load_report.ok(), f"KB loader did not pass validation: {load_report}"

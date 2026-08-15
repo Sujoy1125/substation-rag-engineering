@@ -1,3 +1,4 @@
+
 """Validates evaluation_v2 against the actual KB_v1.1 chunks:
 - unique question IDs, no duplicate questions
 - every referenced chunk ID actually exists in knowledge_chunks.xlsx
@@ -12,7 +13,8 @@ from pathlib import Path
 import openpyxl
 import pandas as pd
 
-KB = Path(__file__).resolve().parents[1] / "KB_v1.1_extracted" / "KB_v1.1_final"
+# KB = Path(__file__).resolve().parents[1] / "KB_v1.1_extracted" / "KB_v1.1_final"
+KB = Path(__file__).resolve().parents[1] / "KB_v1.1" / "KB_v1.1_final"
 OUT = Path(__file__).resolve().parent
 
 chunks_df = pd.read_excel(KB / "knowledge_chunks.xlsx")

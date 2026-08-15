@@ -1,3 +1,4 @@
+
 """Experiment B: evaluation_v2 (44 answerable, D01-D08) comparison,
 baseline EquipmentAwareRetriever vs EquipmentAwareRetrieverV2.
 """
@@ -19,7 +20,8 @@ from src.retrieval.equipment_aware_v2 import EquipmentAwareRetrieverV2, extract_
 from src.retrieval.document_diversity import DocumentDiversityReranker
 from src.retrieval.benchmark import run_benchmark, print_result, is_hit
 
-KB = Path(__file__).resolve().parents[1] / "KB_v1.1_extracted" / "KB_v1.1_final"
+# KB = Path(__file__).resolve().parents[1] / "KB_v1.1_extracted" / "KB_v1.1_final"
+KB = Path(__file__).resolve().parents[1] / "KB_v1.1" / "KB_v1.1_final"
 EVAL = Path(__file__).resolve().parents[1] / "evaluation_v2"
 
 

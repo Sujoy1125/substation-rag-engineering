@@ -1,3 +1,4 @@
+
 """
 KB_v1 Cross-File Validation Script
 Run this any time the knowledge base, equipment inventory, catalog, or evaluation
@@ -7,9 +8,10 @@ Usage: python3 validate_kb.py
 Exit code 0 = PASS, 1 = FAIL (see printed report for details)
 """
 import openpyxl, re, sys
+from pathlib import Path
 from collections import Counter
 
-BASE = "."  # adjust to point at the KB_v1 folder when running standalone
+BASE = Path(__file__).resolve().parent  # adjust to point at the KB_v1 folder when running standalone
 
 def load(path, sheet=None, data_only=True):
     wb = openpyxl.load_workbook(path, data_only=data_only)
