@@ -63,7 +63,14 @@ WITHHOLDING_STATUSES = {
     AnswerStatus.NEEDS_CLARIFICATION,
     AnswerStatus.UNSUPPORTED,
     AnswerStatus.PARSE_ERROR,
+    AnswerStatus.LLM_ERROR,
 }
+
+# LLM_ERROR means the model was never reached. Those questions were not
+# evaluated at all, so every rate computed over them is meaningless — an
+# all-failed run would otherwise print "unsafe assertions 0.000" and read as
+# a perfect safety score. Counted and surfaced, never silently averaged in.
+INVALID_STATUSES = {AnswerStatus.LLM_ERROR}
 
 
 def _rate(numerator: int, denominator: int) -> float:
@@ -286,6 +293,8 @@ class SafetySummary:
 @dataclass
 class EvaluationReport:
     label: str = ""
+    n_llm_errors: int = 0
+    n_questions: int = 0
     answerable: AnswerableMetrics = field(default_factory=AnswerableMetrics)
     unanswerable: UnanswerableMetrics = field(default_factory=UnanswerableMetrics)
     ambiguous: AmbiguousMetrics = field(default_factory=AmbiguousMetrics)
@@ -294,9 +303,18 @@ class EvaluationReport:
     unanswerable_scores: List[UnanswerableScore] = field(default_factory=list)
     ambiguous_scores: List[AmbiguousScore] = field(default_factory=list)
 
+    @property
+    def is_valid(self) -> bool:
+        """False if any question failed to reach the model. Rates from a run
+        with unreached questions are not measurements."""
+        return self.n_llm_errors == 0
+
     def to_dict(self) -> Dict:
         return {
             "label": self.label,
+            "n_llm_errors": self.n_llm_errors,
+            "n_questions": self.n_questions,
+            "results_are_valid": self.is_valid,
             "answerable": asdict(self.answerable),
             "unanswerable": asdict(self.unanswerable),
             "ambiguous": asdict(self.ambiguous),
@@ -415,8 +433,13 @@ def build_report(
     unanswerable: Sequence[UnanswerableScore],
     ambiguous: Sequence[AmbiguousScore],
 ) -> EvaluationReport:
+    all_scores = list(answerable) + list(unanswerable) + list(ambiguous)
+    n_llm_errors = sum(1 for s in all_scores if s.status == AnswerStatus.LLM_ERROR.value)
+
     return EvaluationReport(
         label=label,
+        n_llm_errors=n_llm_errors,
+        n_questions=len(all_scores),
         answerable=aggregate_answerable(answerable),
         unanswerable=aggregate_unanswerable(unanswerable),
         ambiguous=aggregate_ambiguous(ambiguous),
@@ -502,6 +525,21 @@ def print_report(report: EvaluationReport) -> None:
     print(f"\n{'=' * 72}")
     print(f"GENERATION EVALUATION — {report.label}")
     print("=" * 72)
+
+    if not report.is_valid:
+        print()
+        print("!" * 72)
+        print(f"!! RUN INVALID — {report.n_llm_errors}/{report.n_questions} questions never "
+              f"reached the model.")
+        print("!!")
+        print("!! Every rate below is computed over questions the system was never")
+        print("!! actually asked. They are NOT measurements and must not be quoted.")
+        print("!! A run that fails this way would otherwise show 'unsafe assertions")
+        print("!! 0.000', which reads as a perfect safety score.")
+        print("!!")
+        print("!! Fix the connection, then re-run. See the per-question 'error'")
+        print("!! field in the saved JSON for the underlying cause.")
+        print("!" * 72)
 
     print(f"\nANSWERABLE ({a.n}) — target: answer, grounded and correctly cited")
     print(f"  answered                     {a.answer_rate:.3f}")

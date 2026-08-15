@@ -38,7 +38,12 @@ class AnswerStatus(str, Enum):
     NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
     # Assigned by this module, never by the model:
     UNSUPPORTED = "UNSUPPORTED"  # claimed an answer, cited nothing valid
-    PARSE_ERROR = "PARSE_ERROR"  # reply was not usable JSON
+    PARSE_ERROR = "PARSE_ERROR"  # model replied, but not with usable JSON
+    # The model was never reached: network failure, bad key, rate limit,
+    # refused connection. Kept strictly separate from PARSE_ERROR — one is a
+    # statement about the model's output, the other is a statement about the
+    # plumbing, and conflating them sends you debugging the wrong layer.
+    LLM_ERROR = "LLM_ERROR"
 
 
 class MalformedAnswerError(ValueError):

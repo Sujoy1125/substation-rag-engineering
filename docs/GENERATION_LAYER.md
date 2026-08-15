@@ -123,7 +123,17 @@ would add a dependency and a layer of indirection without removing any work.
 | `INSUFFICIENT_EVIDENCE` | model | Evidence does not support an answer. Abstention. |
 | `NEEDS_CLARIFICATION` | model | Question cannot be safely answered as asked. |
 | `UNSUPPORTED` | **code** | Model claimed `ANSWER` but cited no valid label, or returned empty text. |
-| `PARSE_ERROR` | **code** | Reply was not usable JSON. |
+| `PARSE_ERROR` | **code** | Model replied, but not with usable JSON. |
+| `LLM_ERROR` | **code** | Model never reached — network failure, bad key, rate limit. |
+
+`LLM_ERROR` is kept strictly separate from `PARSE_ERROR`: one is a statement
+about the plumbing, the other about the model's output, and conflating them
+sends you debugging the wrong layer. A question that returns `LLM_ERROR` was
+never actually asked, so `EvaluationReport.is_valid` goes false and the report
+prints an INVALID banner rather than rates — otherwise an all-failed run
+displays `unsafe assertions 0.000`, which reads as a perfect safety score.
+The runner also aborts after three consecutive failures rather than burning
+57 API calls against a dead connection.
 
 An unrecognised status string degrades to `INSUFFICIENT_EVIDENCE` — abstention
 is the safe default.

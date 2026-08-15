@@ -60,6 +60,7 @@ from src.evaluation.generation_eval import (
     score_unanswerable,
 )
 from src.evaluation.judge import AnswerJudge, judge_all
+from src.generation.answer import AnswerStatus
 from src.generation.llm import LLMUnavailableError, client_from_env
 from src.generation.pipeline import DEFAULT_TOP_K, RAGPipeline, load_kb
 from src.retrieval.benchmark import page_numbers
@@ -297,20 +298,63 @@ def run_live(answerable, unanswerable, ambiguous, chunks, args) -> int:
 
     pipeline = RAGPipeline(chunks, llm=client, top_k=args.top_k).index()
 
+    # Stop early rather than burning 57 API calls against a dead connection.
+    # The first run of this harness failed all 9 calls with "Connection error"
+    # and still printed a full metrics table; fail fast and say why instead.
+    MAX_CONSECUTIVE_ERRORS = 3
+
+    class ConnectionDead(RuntimeError):
+        pass
+
+    state = {"consecutive_errors": 0}
+
     def run_class(name, questions):
         out = []
         for i, q in enumerate(questions, start=1):
             result = pipeline.answer(q.question)
-            print(f"  [{name} {i}/{len(questions)}] {q.question_id} -> {result.answer.status.value}")
+            status = result.answer.status
+            line = f"  [{name} {i}/{len(questions)}] {q.question_id} -> {status.value}"
+            if result.error:
+                line += f"   {result.error}"
+            print(line)
             out.append(result)
+
+            if status is AnswerStatus.LLM_ERROR:
+                state["consecutive_errors"] += 1
+                if state["consecutive_errors"] >= MAX_CONSECUTIVE_ERRORS:
+                    raise ConnectionDead(result.error or "the model could not be reached")
+            else:
+                state["consecutive_errors"] = 0
         return out
 
-    print("Running answerable...")
-    a_results = run_class("A", answerable)
-    print("Running unanswerable...")
-    u_results = run_class("U", unanswerable)
-    print("Running ambiguous...")
-    m_results = run_class("M", ambiguous)
+    def abort(reason: str) -> int:
+        print(f"\n{'!' * 72}")
+        print(f"ABORTED after {MAX_CONSECUTIVE_ERRORS} consecutive failures to reach the model.")
+        print(f"  {reason}")
+        print("!" * 72)
+        print(
+            "\nNothing was measured, so no report is produced. Common causes:\n"
+            "  - no internet route to api.openai.com (campus/corporate firewall,\n"
+            "    proxy required, or captive portal)\n"
+            "  - the API key is revoked, mistyped, or has no credit\n"
+            "  - OPENAI_BASE_URL is set to something unreachable\n"
+            "\nQuick check:\n"
+            '  python -c "import openai,os;'
+            'print(openai.OpenAI(api_key=os.getenv(\'OPENAI_API_KEY\')).models.list().data[0].id)"\n'
+            "\nThe free dry mode still works and needs no network:\n"
+            "  python experiments/run_generation_eval.py"
+        )
+        return 3
+
+    try:
+        print("Running answerable...")
+        a_results = run_class("A", answerable)
+        print("Running unanswerable...")
+        u_results = run_class("U", unanswerable)
+        print("Running ambiguous...")
+        m_results = run_class("M", ambiguous)
+    except ConnectionDead as e:
+        return abort(str(e))
 
     a_scores = [score_answerable(q, r) for q, r in zip(answerable, a_results)]
     u_scores = [score_unanswerable(q, r) for q, r in zip(unanswerable, u_results)]

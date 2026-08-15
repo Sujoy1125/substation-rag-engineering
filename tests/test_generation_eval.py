@@ -370,6 +370,66 @@ def test_safety_counts_every_class_of_unsafe_assertion():
     assert s.unsafe_assertion_rate == 1.0
 
 
+class DeadClient(ScriptedClient):
+    """A client that cannot reach the model, like a firewalled network."""
+
+    is_real = True  # must pass assert_real_client; the failure is the network
+
+    def complete(self, messages):
+        from src.generation.llm import LLMUnavailableError
+
+        raise LLMUnavailableError("OpenAI request failed: Connection error.")
+
+
+def dead_pipeline():
+    return RAGPipeline(default_corpus(), llm=DeadClient([]), top_k=5).index()
+
+
+def test_unreachable_model_is_llm_error_not_parse_error():
+    """A dead connection is a statement about the plumbing; PARSE_ERROR is a
+    statement about the model's output. Conflating them sends you debugging
+    the wrong layer."""
+    result = dead_pipeline().answer(OIL_QUERY)
+    assert result.answer.status is AnswerStatus.LLM_ERROR
+    assert "Connection error" in result.error
+    assert "could not be reached" in result.rendered()
+
+
+def test_run_with_unreachable_model_is_marked_invalid():
+    """The failure that motivated this: 9/9 calls failed and the report still
+    printed 'unsafe assertions 0.000', which reads as a perfect safety score."""
+    pipe = dead_pipeline()
+    a = score_answerable(answerable_q(), pipe.answer(OIL_QUERY))
+    u = score_unanswerable(unanswerable_q(), dead_pipeline().answer(OIL_QUERY))
+    m = score_ambiguous(ambiguous_q(), dead_pipeline().answer(OIL_QUERY))
+
+    report = build_report("dead", [a], [u], [m])
+    assert report.n_llm_errors == 3
+    assert report.n_questions == 3
+    assert report.is_valid is False
+    assert report.to_dict()["results_are_valid"] is False
+
+
+def test_unreachable_questions_are_not_counted_as_safe_abstentions():
+    """An unreached question must not be scored as the system correctly
+    declining to answer."""
+    u = score_unanswerable(unanswerable_q(), dead_pipeline().answer(OIL_QUERY))
+    assert not u.answered
+    assert not u.abstained  # never asked, so it did not abstain
+
+    a = score_answerable(answerable_q(), dead_pipeline().answer(OIL_QUERY))
+    assert not a.answered
+    assert not a.is_false_answer
+
+
+def test_successful_run_is_valid():
+    pipe = pipeline_with(reply_citing(["E1"]))
+    a = score_answerable(answerable_q(), pipe.answer(OIL_QUERY))
+    report = build_report("live", [a], [], [])
+    assert report.n_llm_errors == 0
+    assert report.is_valid is True
+
+
 def test_report_serialises():
     pipe = pipeline_with(reply_citing(["E1"]))
     a = score_answerable(answerable_q(), pipe.answer("transformer oil BDV test frequency"))

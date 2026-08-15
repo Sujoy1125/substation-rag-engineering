@@ -98,6 +98,8 @@ class PipelineResult:
                 "An answer was produced but could not be tied to retrieved evidence, "
                 "so it is withheld. " + a.downgrade_reason
             )
+        if a.status is AnswerStatus.LLM_ERROR:
+            return f"The language model could not be reached. {a.parse_error}"
         return f"The answer could not be processed ({a.status.value}). {a.parse_error}"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -203,6 +205,9 @@ class RAGPipeline:
         except LLMUnavailableError as e:
             generation_ms = (time.perf_counter() - t1) * 1000
             failed = build_answer(question, "", context)
+            # NOT a parse error: nothing came back to parse. Mislabelling this
+            # makes a dead network look like a model that emits bad JSON.
+            failed.status = AnswerStatus.LLM_ERROR
             failed.parse_error = f"LLM unavailable: {e}"
             total = (time.perf_counter() - t_start) * 1000
             return PipelineResult(
