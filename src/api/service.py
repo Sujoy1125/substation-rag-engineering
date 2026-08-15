@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field, field_validator
 
-from src.common.chunk import Chunk
+from src.common.chunk import SENTINELS, Chunk
 from src.confidence.gate import ConfidenceGate, ConfidenceModel, UncalibratedGateError
 from src.confidence.gated import apply_gate
 from src.generation.answer import AnswerStatus
@@ -42,6 +42,7 @@ from src.generation.llm import LLMClient, LLMUnavailableError
 from src.generation.pipeline import DEFAULT_KB_PATH, DEFAULT_TOP_K, PipelineResult, RAGPipeline
 
 MAX_QUESTION_CHARS = 1000
+UI_PATH = Path(__file__).resolve().parent / "static" / "index.html"
 
 
 class AskRequest(BaseModel):
@@ -58,6 +59,14 @@ class AskRequest(BaseModel):
 
 
 class CitationOut(BaseModel):
+    """A citation, plus the operational fields of the chunk behind it.
+
+    frequency / technical_limit_value / safety_information are read from the KB
+    record by chunk_id, never parsed out of the generated answer — the same rule
+    the citation itself follows. Null means the KB carries a sentinel there
+    (NOT COVERED / NOT VERIFIED), which is an absence, not a value to display.
+    """
+
     label: str = Field(description="The label the model cited, e.g. E1")
     chunk_id: str = Field(description="Resolvable at GET /evidence/{chunk_id}")
     document_id: str
@@ -65,14 +74,57 @@ class CitationOut(BaseModel):
     section: str
     page: str
     organization: str
-    authority_level: str
+    authority_level: str = Field(description="HIGH | MEDIUM — provenance weight of the source")
     retrieval_rank: int = Field(description="Rank of this chunk in the retrieved set")
+    equipment: Optional[str] = None
+    knowledge_type: Optional[str] = Field(
+        default=None, description="SAFETY | SCHEDULE | TESTING | FAILURE_ANALYSIS | …"
+    )
+    frequency: Optional[str] = Field(default=None, description="Maintenance interval, verbatim")
+    technical_limit_value: Optional[str] = Field(default=None, description="Limit value, verbatim")
+    safety_information: Optional[str] = None
+
+
+class SafetyNoteOut(BaseModel):
+    label: str
+    chunk_id: str
+    text: str
 
 
 class EvidenceOut(BaseModel):
     chunk_id: str
     score: float
     rank: int
+    equipment: Optional[str] = None
+    topic: Optional[str] = None
+    document_title: Optional[str] = None
+
+
+class EquipmentFacet(BaseModel):
+    name: str
+    chunks: int
+
+
+class DocumentFacet(BaseModel):
+    document_id: str
+    title: str
+    organization: str
+    authority_level: str
+    chunks: int
+
+
+class FacetsResponse(BaseModel):
+    """What the knowledge base covers — an honest coverage statement.
+
+    A corpus is never uniform. Showing the distribution lets someone see that
+    this one is transformer-heavy before they assume a question about relay
+    panels will be answerable.
+    """
+
+    total_chunks: int
+    equipment: List[EquipmentFacet]
+    knowledge_types: List[EquipmentFacet]
+    documents: List[DocumentFacet]
 
 
 class GateOut(BaseModel):
@@ -115,6 +167,13 @@ class AskResponse(BaseModel):
     citations: List[CitationOut]
     evidence_considered: List[EvidenceOut] = Field(
         description="Everything retrieved, cited or not — the recall side of the audit"
+    )
+    safety_notes: List[SafetyNoteOut] = Field(
+        default_factory=list,
+        description=(
+            "Safety text carried by the cited evidence, verbatim from the KB. "
+            "Present only when the model cited a chunk that has any."
+        ),
     )
     gated: bool = Field(
         description=(
@@ -280,24 +339,19 @@ class RAGService:
             "status": a.status.value,
             "answer": a.answer_text,
             "display_text": result.rendered(),
-            "citations": [
-                {
-                    "label": c.label,
-                    "chunk_id": c.chunk_id,
-                    "document_id": c.document_id,
-                    "document_title": c.document_title,
-                    "section": c.section,
-                    "page": c.page,
-                    "organization": c.organization,
-                    "authority_level": c.authority_level,
-                    "retrieval_rank": c.retrieval_rank,
-                }
-                for c in a.citations
-            ],
+            "citations": [self._citation_payload(c) for c in a.citations],
             "evidence_considered": [
-                {"chunk_id": r.chunk.chunk_id, "score": round(r.score, 4), "rank": i + 1}
+                {
+                    "chunk_id": r.chunk.chunk_id,
+                    "score": round(r.score, 4),
+                    "rank": i + 1,
+                    "equipment": self._clean(r.chunk.equipment),
+                    "topic": self._clean(r.chunk.topic),
+                    "document_title": r.chunk.document_title,
+                }
                 for i, r in enumerate(result.retrieved)
             ],
+            "safety_notes": self._safety_notes(a.citations),
             "gated": self.is_gated,
             "gate": gate_payload,
             "llm": {"provider": result.llm_provider, "model": result.llm_model},
@@ -316,6 +370,107 @@ class RAGService:
         if a.downgrade_reason:
             payload["downgrade_reason"] = a.downgrade_reason
         return payload
+
+    @staticmethod
+    def _clean(value: str) -> Optional[str]:
+        """A sentinel is an absence. Return None so the UI omits the row rather
+        than printing "NOT COVERED" at a technician as though it were content."""
+        return None if value is None or value.strip().upper() in SENTINELS else value.strip()
+
+    def _citation_payload(self, c) -> Dict[str, Any]:
+        """A citation plus the operational fields of the chunk it points at.
+
+        Frequency, technical limits and safety text are read from the KB record
+        by chunk_id — NEVER parsed out of the generated answer. That is the same
+        rule the citation itself follows: the model chooses which evidence to
+        point at, and everything displayed about that evidence comes from the
+        knowledge base.
+        """
+        chunk = self._by_id.get(c.chunk_id)
+        payload = {
+            "label": c.label,
+            "chunk_id": c.chunk_id,
+            "document_id": c.document_id,
+            "document_title": c.document_title,
+            "section": c.section,
+            "page": c.page,
+            "organization": c.organization,
+            "authority_level": c.authority_level,
+            "retrieval_rank": c.retrieval_rank,
+            "equipment": None,
+            "knowledge_type": None,
+            "frequency": None,
+            "technical_limit_value": None,
+            "safety_information": None,
+        }
+        if chunk is not None:
+            payload.update(
+                equipment=self._clean(chunk.equipment),
+                knowledge_type=self._clean(chunk.knowledge_type),
+                frequency=self._clean(chunk.frequency),
+                technical_limit_value=self._clean(chunk.technical_limit_value),
+                safety_information=self._clean(chunk.safety_information),
+            )
+        return payload
+
+    def _safety_notes(self, citations) -> List[Dict[str, str]]:
+        """Safety text carried by the cited evidence, surfaced separately.
+
+        201 of the 1745 chunks are SAFETY-typed, and this is a domain where a
+        precaution buried in the middle of a paragraph is a precaution someone
+        skims past. Pulling it out is a display decision; the content is
+        verbatim from the KB and appears only when the model actually cited the
+        chunk carrying it.
+        """
+        notes, seen = [], set()
+        for c in citations:
+            chunk = self._by_id.get(c.chunk_id)
+            if chunk is None:
+                continue
+            text = self._clean(chunk.safety_information)
+            if text and text not in seen:
+                seen.add(text)
+                notes.append({"label": c.label, "chunk_id": c.chunk_id, "text": text})
+        return notes
+
+    def facets(self) -> Dict[str, Any]:
+        """What the knowledge base actually covers.
+
+        Powers the equipment selector, and doubles as an honest coverage
+        statement: a user can see the corpus is transformer-heavy before
+        assuming a question about, say, relay panels will be answerable.
+        """
+        from collections import Counter
+
+        equipment = Counter()
+        knowledge = Counter()
+        documents = {}
+        for c in self.pipeline.chunks:
+            eq = self._clean(c.equipment)
+            if eq:
+                # Multi-equipment chunks are stored comma-joined; count each.
+                for part in (p.strip() for p in eq.split(",")):
+                    if part:
+                        equipment[part] += 1
+            kt = self._clean(c.knowledge_type)
+            if kt:
+                knowledge[kt] += 1
+            if c.document_id not in documents:
+                documents[c.document_id] = {
+                    "document_id": c.document_id,
+                    "title": c.document_title,
+                    "organization": c.organization,
+                    "authority_level": c.authority_level,
+                    "chunks": 0,
+                }
+            documents[c.document_id]["chunks"] += 1
+
+        return {
+            "total_chunks": len(self.pipeline.chunks),
+            "equipment": [{"name": k, "chunks": v} for k, v in equipment.most_common(24)],
+            "knowledge_types": [{"name": k, "chunks": v} for k, v in knowledge.most_common()],
+            "documents": sorted(documents.values(), key=lambda d: -d["chunks"]),
+        }
 
     def evidence(self, chunk_id: str) -> Optional[Dict[str, Any]]:
         """The full KB record behind a citation, sentinels and all.
@@ -365,7 +520,7 @@ def create_app(service: RAGService):
     imports it constantly.
     """
     from fastapi import FastAPI, HTTPException
-    from fastapi.responses import JSONResponse, RedirectResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
     app = FastAPI(
         title="Substation O&M Assistant",
@@ -381,13 +536,15 @@ def create_app(service: RAGService):
 
     @app.get("/", include_in_schema=False)
     def index():
-        """Send a browser to the interactive docs.
+        """Serve the demo UI, or fall back to the API docs.
 
         The first thing anyone does with a new service is open its root in a
-        browser. Answering that with 404 reads as "broken" when the service is
-        fine — and during a demo nobody has time to work out that the real
-        entry point was /docs all along.
+        browser, and during a demo nobody has time to discover that the real
+        entry point was somewhere else. If the UI file is missing the service
+        still works — it just sends you to /docs instead of 404ing.
         """
+        if UI_PATH.exists():
+            return HTMLResponse(UI_PATH.read_text(encoding="utf-8"))
         return RedirectResponse(url="/docs")
 
     @app.get(
@@ -415,6 +572,14 @@ def create_app(service: RAGService):
             # specific cause — out of credit, rate limited, bad key — so the
             # caller is not left debugging the wrong system.
             raise HTTPException(status_code=503, detail=str(e)) from e
+
+    @app.get(
+        "/facets",
+        response_model=FacetsResponse,
+        summary="What the knowledge base covers",
+    )
+    def facets():
+        return service.facets()
 
     @app.get(
         "/evidence/{chunk_id}",

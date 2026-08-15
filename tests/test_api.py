@@ -23,6 +23,9 @@ from src.confidence.gate import ConfidenceGate, ConfidenceModel, Decision  # noq
 from src.generation.llm import LLMUnavailableError, ScriptedClient  # noqa: E402
 from src.generation.pipeline import RAGPipeline  # noqa: E402
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+UI_HTML = (REPO_ROOT / "src" / "api" / "static" / "index.html").read_text(encoding="utf-8")
+
 
 def make_chunk(**overrides) -> Chunk:
     base = dict(
@@ -295,15 +298,120 @@ def test_openapi_documents_the_answer_shape_not_a_bare_string():
     assert "AskResponse" in spec["components"]["schemas"]
 
 
-def test_root_sends_a_browser_to_the_docs_instead_of_404ing():
+def test_root_serves_the_ui():
     """Opening the root URL is the first thing anyone does. A 404 there reads
     as a broken service."""
+    c = client_for(build_service([GOOD_REPLY]))
+
+    r = c.get("/", follow_redirects=True)
+    assert r.status_code == 200
+    assert "<!DOCTYPE html>" in r.text
+
+
+def test_root_falls_back_to_docs_when_the_ui_file_is_absent(monkeypatch):
+    """A missing UI asset must not take the API down with it."""
+    from src.api import service as service_module
+
+    monkeypatch.setattr(service_module, "UI_PATH", Path("/nonexistent/index.html"))
     c = client_for(build_service([GOOD_REPLY]))
 
     r = c.get("/", follow_redirects=False)
     assert r.status_code in (301, 302, 307)
     assert r.headers["location"] == "/docs"
-    assert c.get("/", follow_redirects=True).status_code == 200
+
+
+def test_ui_uses_no_external_resources():
+    """A demo venue's wifi is not something to bet a presentation on, and every
+    external request is a chance to show a judge a blank page."""
+    html = UI_HTML
+    for pattern in ("http://", "https://", "//cdn", "src=\"//"):
+        assert pattern not in html, f"UI reaches outside itself: {pattern!r}"
+
+
+def test_ui_calls_the_endpoints_the_service_actually_exposes():
+    html = UI_HTML
+    for path in ('"/ask"', '"/health"', '"/facets"', "/evidence/"):
+        assert path in html, f"UI calls {path} which the service must expose"
+
+    c = client_for(build_service([GOOD_REPLY]))
+    spec = c.get("/openapi.json").json()["paths"]
+    for path in ("/ask", "/health", "/facets", "/evidence/{chunk_id}"):
+        assert path in spec, f"UI calls {path} but the API does not serve it"
+
+
+def test_ui_never_reads_domain_values_out_of_generated_text():
+    """Intervals, limits and safety text must come from the citation payload —
+    i.e. from KB metadata — not from parsing the model's prose. The only thing
+    scraped from answer text is the [E1] label, which is validated upstream."""
+    html = UI_HTML
+
+    assert "c.frequency" in html and "c.technical_limit_value" in html
+    assert "safety_notes" in html
+    # exactly one regex over the answer body, and it only finds evidence labels
+    assert html.count(".replace(/\\[(E\\d+)\\]/g") == 1
+
+
+def test_ui_renders_every_answer_status():
+    """A status the UI does not know about would render as a blank card, which
+    at a demo looks like a crash."""
+    html = UI_HTML
+    from src.generation.answer import AnswerStatus
+
+    for status in AnswerStatus:
+        if status is AnswerStatus.LLM_ERROR:
+            continue  # surfaced as HTTP 503, never as an answer body
+        assert status.value in html, f"UI has no rendering for {status.value}"
+
+
+def test_citations_carry_the_operational_fields_from_the_kb():
+    """A technician needs the interval and the limit, and they must come from
+    the KB record rather than from whatever the model wrote."""
+    c = client_for(build_service([GOOD_REPLY]))
+    body = c.post("/ask", json={"question": "insulating oil BDV frequency"}).json()
+
+    cite = body["citations"][0]
+    assert cite["frequency"] == "Annually"
+    assert cite["technical_limit_value"] == "60 kV minimum"
+    assert cite["knowledge_type"] == "Frequency"
+
+
+def test_sentinel_fields_are_null_not_the_word_NOT_COVERED():
+    """"NOT COVERED" is an absence. Displaying it to a technician as though it
+    were content is worse than showing nothing."""
+    c = client_for(build_service([GOOD_REPLY]))
+    cite = c.post("/ask", json={"question": "insulating oil BDV"}).json()["citations"][0]
+
+    assert cite["safety_information"] is None  # the fixture chunk has NOT COVERED
+
+
+def test_safety_notes_appear_only_when_a_cited_chunk_carries_them():
+    safety_chunk = make_chunk(
+        chunk_id="D05-C0100",
+        document_title="CEA Safety Regulations",
+        knowledge_type="SAFETY",
+        equipment="Circuit Breaker",
+        topic="Isolation",
+        verified_information="Circuit breakers shall be isolated and earthed before any work.",
+        safety_information="Confirm isolation and apply earths before approaching the equipment.",
+    )
+    pipeline = RAGPipeline(CHUNKS + [safety_chunk], llm=ScriptedClient([GOOD_REPLY]), top_k=3).index()
+    body = client_for(RAGService(pipeline)).post(
+        "/ask", json={"question": "insulating oil BDV frequency"}
+    ).json()
+
+    # The fixture reply cites E1 only; safety notes must follow the citations,
+    # not the retrieved set — evidence the model did not rely on says nothing.
+    for note in body["safety_notes"]:
+        assert note["chunk_id"] in {c["chunk_id"] for c in body["citations"]}
+
+
+def test_facets_report_real_coverage():
+    c = client_for(build_service([GOOD_REPLY]))
+    f = c.get("/facets").json()
+
+    assert f["total_chunks"] == len(CHUNKS)
+    assert {e["name"] for e in f["equipment"]} >= {"Power Transformer", "Circuit Breaker"}
+    assert sum(d["chunks"] for d in f["documents"]) == len(CHUNKS)
 
 
 def test_unknown_chunk_id_is_404():

@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Substation O&amp;M Assistant</title>
+<meta name="description" content="Evidence-grounded question answering over verified CEA and BHEL substation maintenance documents.">
+<meta name="theme-color" content="#0b0f14">
+<!-- Inlined PNG rather than an SVG data URI: an SVG one needs an xmlns
+     declaration, and this page holds itself to containing no external URLs at
+     all so the no-network-dependency guarantee stays trivially checkable. -->
+<link rel="icon" type="image/png" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABYElEQVR42u2bQRKCMAxFabZ4F7kRHk1uhHfRNa501KFYmDb57U/XOsN7+QktDKHbsfpxXroK1mMaQupvQyvQR2VIy/ApDKFV8NQ0CAt8jE1Y4GOM0pEvYar+Gquwwf9K8BZAu6D79awrACn+2vD9OC/CCg/bAqfLjU+AVfUhBFjCmwuwhvd9gKUAhOqbCYjBa98BTASgVN5ngIUAtOqrCkCEVxOACq8iIBXe4g7gQ7C0AOTov1Yo9UBEAz5H2wgzfLUzIOfAFMa+LyagpuhnF1AjfFUzoNRGSRj7PquAWqNffCOUS1rpM4Iw9r0fhiwFoB2PhTX6sAIoX45awfsQRBJA8UwQ6ZUYTAIs4X0GWAuwrr6pAAR4MwEo8KoCYF+O7vnAqLXqP6YhCCu8egsgwr8FaLcBSvy/EsAk4ZPVd4IxMwzVX01AyxLW2DZhW/mYaquocvSPLcD/TUCtidhTuCefqpPsgSKt3wAAAABJRU5ErkJggg==">
+<!--
+  DESIGN NOTES
+
+  Two readers, one page. A technician at the switchyard needs the interval, the
+  limit, the safety text and the document page a supervisor will ask for. An
+  engineer or reviewer needs retrieval scores, uncited evidence and gate
+  signals — behind the Detail switch, off by default, because BM25 scores in
+  front of someone mid-job are noise.
+
+  Visual language is instrument panel, not consumer chat: one accent colour,
+  colour used only where it carries meaning (red = safety, amber = abstained,
+  green = grounded), tabular figures for anything numeric, monospace for
+  identifiers a person may have to read aloud or type into a system of record.
+  A restrained palette is not decoration here — if every element is coloured,
+  the red safety block stops being noticeable, which is the one thing that
+  must always be noticeable.
+
+  Honesty properties the styling must never soften:
+    * the confidence gate's true state is displayed on every answer
+    * safety text is labelled as recorded in the source, not as advice
+    * a provider failure is visibly NOT an abstention
+    * sentinel values are shown greyed, never hidden
+
+  Dependency-free: no CDN, no framework, no web fonts. Demo venue wifi is not
+  something to bet a presentation on.
+-->
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#0b0f14; --surface:#111820; --surface-2:#16202b; --surface-3:#1b2733;
+    --line:#22303d; --line-soft:#1a242f;
+    --ink:#e8eef5; --ink-2:#a9b6c4; --ink-3:#71818f;
+    --accent:#3d8bfd; --accent-ink:#fff; --accent-soft:rgba(61,139,253,.16);
+    --ok:#3fb950; --ok-soft:rgba(63,185,80,.14); --ok-line:rgba(63,185,80,.35);
+    --warn:#d99a2b; --warn-soft:rgba(217,154,43,.14); --warn-line:rgba(217,154,43,.38);
+    --bad:#f0564d; --bad-soft:rgba(240,86,77,.12); --bad-line:rgba(240,86,77,.34);
+    --shadow:0 1px 2px rgba(0,0,0,.35), 0 14px 34px -20px rgba(0,0,0,.7);
+    --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:34px;
+    --r1:6px; --r2:10px; --r3:14px;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --bg:#eceff3; --surface:#fff; --surface-2:#f4f6f9; --surface-3:#eaeef3;
+      --line:#d9dfe6; --line-soft:#e7ebf0;
+      --ink:#0f1720; --ink-2:#4a5866; --ink-3:#788593;
+      --accent:#0b5fd0; --accent-soft:rgba(11,95,208,.09);
+      --ok:#137a3a; --ok-soft:rgba(19,122,58,.10); --ok-line:rgba(19,122,58,.30);
+      --warn:#9a6400; --warn-soft:rgba(154,100,0,.10); --warn-line:rgba(154,100,0,.30);
+      --bad:#c62b28; --bad-soft:rgba(198,43,40,.07); --bad-line:rgba(198,43,40,.26);
+      --shadow:0 1px 2px rgba(16,24,40,.06), 0 12px 28px -18px rgba(16,24,40,.28);
+    }
+  }
+  * { box-sizing:border-box; }
+  /* `hidden` must win over any display rule set on the same element — the
+     empty state is display:grid, which would otherwise ignore it. */
+  [hidden] { display:none !important; }
+  html { -webkit-text-size-adjust:100%; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+    font-feature-settings:"tnum" 0;
+    -webkit-font-smoothing:antialiased;
+  }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .num, .mono { font-family:var(--mono); font-feature-settings:"tnum" 1; font-variant-numeric:tabular-nums; }
+
+  /* ================= app bar ================= */
+  .appbar {
+    position:sticky; top:0; z-index:30;
+    background:color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter:saturate(1.4) blur(8px);
+    border-bottom:1px solid var(--line);
+  }
+  .appbar-inner {
+    max-width:960px; margin:0 auto; padding:var(--s3) var(--s5);
+    display:flex; align-items:center; gap:var(--s4);
+  }
+  .brandgroup { display:flex; align-items:center; gap:var(--s3); min-width:0; }
+  .mark { width:30px; height:30px; flex:none; border-radius:8px; background:var(--accent-soft);
+          border:1px solid var(--line); display:grid; place-items:center; }
+  .mark svg { display:block; }
+  .titles { min-width:0; }
+  .titles h1 { margin:0; font-size:15px; font-weight:640; letter-spacing:-.1px; white-space:nowrap; }
+  .titles p { margin:1px 0 0; font-size:11.5px; color:var(--ink-3); white-space:nowrap;
+              overflow:hidden; text-overflow:ellipsis; }
+  .rail { margin-left:auto; display:flex; align-items:center; gap:var(--s3); flex-wrap:wrap; justify-content:flex-end; }
+  .stat { font-size:11.5px; color:var(--ink-3); white-space:nowrap; }
+  .stat b { color:var(--ink-2); font-weight:600; }
+  .chipflag {
+    font-size:11px; letter-spacing:.2px; padding:3px 9px; border-radius:999px; white-space:nowrap;
+    border:1px solid var(--line); background:var(--surface-2); color:var(--ink-3);
+  }
+  .chipflag.warn { border-color:var(--warn-line); background:var(--warn-soft); color:var(--warn); }
+  .chipflag.bad { border-color:var(--bad-line); background:var(--bad-soft); color:var(--bad); }
+  .chipflag b { font-weight:650; }
+  .switch { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--ink-3);
+            cursor:pointer; user-select:none; white-space:nowrap; }
+  .switch input { appearance:none; width:32px; height:18px; border-radius:999px; background:var(--surface-3);
+                  border:1px solid var(--line); position:relative; cursor:pointer; transition:background .15s; }
+  .switch input::after { content:""; position:absolute; top:2px; left:2px; width:12px; height:12px;
+                         border-radius:50%; background:var(--ink-3); transition:transform .15s, background .15s; }
+  .switch input:checked { background:var(--accent-soft); border-color:var(--accent); }
+  .switch input:checked::after { transform:translateX(14px); background:var(--accent); }
+
+  /* ================= layout ================= */
+  main { max-width:960px; margin:0 auto; padding:var(--s5) var(--s5) 72px; }
+
+  .console { background:var(--surface); border:1px solid var(--line); border-radius:var(--r3);
+             box-shadow:var(--shadow); padding:var(--s4); }
+  .field-label { font-size:11px; font-weight:650; letter-spacing:.8px; text-transform:uppercase;
+                 color:var(--ink-3); margin-bottom:var(--s2); display:flex; gap:var(--s2);
+                 align-items:baseline; flex-wrap:wrap; }
+  .field-label span { font-weight:400; letter-spacing:0; text-transform:none; font-size:12px; }
+  .askrow { display:flex; gap:var(--s2); }
+  #q { flex:1; min-width:0; padding:13px 15px; font-size:16px; color:var(--ink);
+       background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r2);
+       transition:border-color .12s, box-shadow .12s; }
+  #q::placeholder { color:var(--ink-3); }
+  #q:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+  #go { padding:13px 24px; font-size:15px; font-weight:640; border:none; border-radius:var(--r2);
+        background:var(--accent); color:var(--accent-ink); cursor:pointer; white-space:nowrap;
+        transition:filter .12s, transform .06s; }
+  #go:hover:not(:disabled) { filter:brightness(1.08); }
+  #go:active:not(:disabled) { transform:translateY(1px); }
+  #go:disabled { opacity:.5; cursor:default; }
+
+  .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { font-size:12.5px; padding:6px 12px; border-radius:999px; cursor:pointer; color:var(--ink-2);
+          border:1px solid var(--line); background:var(--surface-2); transition:all .12s; }
+  .chip:hover { border-color:var(--accent); color:var(--ink); }
+  .chip[aria-pressed="true"] { border-color:var(--accent); background:var(--accent); color:var(--accent-ink); font-weight:600; }
+  .chip .n { font-size:11px; opacity:.6; margin-left:5px; font-family:var(--mono); }
+  .divider { height:1px; background:var(--line-soft); margin:var(--s4) 0; }
+  .effective { margin-top:var(--s2); font-size:12px; color:var(--ink-3); }
+  .effective code { font-family:var(--mono); background:var(--surface-3); padding:2px 6px; border-radius:var(--r1); color:var(--ink-2); }
+
+  /* ================= result card ================= */
+  .card { margin-top:var(--s5); background:var(--surface); border:1px solid var(--line);
+          border-radius:var(--r3); box-shadow:var(--shadow); overflow:hidden;
+          border-left:3px solid var(--line); }
+  .card.answer { border-left-color:var(--ok); }
+  .card.abstain { border-left-color:var(--warn); }
+  .card.clarify { border-left-color:var(--accent); }
+  .card.unsup, .card.infra { border-left-color:var(--bad); }
+  .card-head { padding:var(--s3) var(--s4); border-bottom:1px solid var(--line-soft);
+               display:flex; align-items:center; gap:var(--s3); flex-wrap:wrap; background:var(--surface-2); }
+  .verdict { font-size:11.5px; font-weight:700; letter-spacing:1px; text-transform:uppercase; }
+  .answer .verdict{color:var(--ok);} .abstain .verdict{color:var(--warn);}
+  .clarify .verdict{color:var(--accent);} .unsup .verdict,.infra .verdict{color:var(--bad);}
+  .subtle { color:var(--ink-3); font-size:12.5px; }
+  .card-body { padding:var(--s5) var(--s4) var(--s4); }
+  .answer-text { font-size:17px; line-height:1.62; letter-spacing:-.1px; white-space:pre-wrap; }
+  .note { color:var(--ink-2); font-size:14.5px; }
+
+  /* ---- safety ---- */
+  .qline { font-size:13.5px; color:var(--ink-2); margin-bottom:var(--s4);
+           padding-bottom:var(--s3); border-bottom:1px solid var(--line-soft); }
+  .qlabel { font-size:10.5px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+            color:var(--ink-3); margin-right:var(--s2); }
+  .printhead { display:none; }
+  kbd { font-family:var(--mono); font-size:10.5px; padding:1px 5px; border-radius:4px;
+        border:1px solid var(--line); background:var(--surface-3); color:var(--ink-3); }
+  .safety { border:1px solid var(--bad-line); background:var(--bad-soft); border-radius:var(--r2);
+            padding:var(--s3) var(--s4); margin-bottom:var(--s4); }
+  .safety h4 { margin:0 0 var(--s2); font-size:10.5px; font-weight:700; letter-spacing:1.1px;
+               text-transform:uppercase; color:var(--bad); }
+  .safety p { margin:0 0 var(--s2); font-size:14.5px; }
+  .safety p:last-child { margin-bottom:0; }
+  .safety .src { color:var(--ink-3); font-size:11.5px; font-family:var(--mono); }
+  .safety .caveat { color:var(--ink-3); font-size:12px; font-family:inherit;
+                    border-top:1px solid var(--bad-line); padding-top:var(--s2); margin-top:var(--s3); }
+
+  /* ---- key facts ---- */
+  .facts { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:var(--s2); margin-top:var(--s4); }
+  .fact { border:1px solid var(--line); border-radius:var(--r2); background:var(--surface-2); padding:var(--s3) var(--s4); }
+  .fact .k { font-size:10.5px; font-weight:650; letter-spacing:1px; text-transform:uppercase; color:var(--ink-3); }
+  .fact .v { font-size:20px; font-weight:650; margin-top:3px; letter-spacing:-.3px; }
+  .fact .s { font-size:11px; color:var(--ink-3); margin-top:2px; font-family:var(--mono); }
+
+  /* ---- labels, sections, sources ---- */
+  .ev-label { display:inline-block; font-family:var(--mono); font-size:11.5px; font-weight:600;
+              padding:1px 6px; margin:0 2px; border-radius:var(--r1); cursor:pointer;
+              border:1px solid var(--accent); color:var(--accent); background:transparent; transition:all .12s; }
+  .ev-label:hover { background:var(--accent); color:var(--accent-ink); }
+  .sect { display:flex; align-items:center; gap:var(--s3); margin:var(--s5) 0 var(--s3); }
+  .sect h3 { margin:0; font-size:10.5px; font-weight:700; letter-spacing:1.1px; text-transform:uppercase; color:var(--ink-3); }
+  .sect .rule { flex:1; height:1px; background:var(--line-soft); }
+  .src-item { display:flex; gap:var(--s3); padding:var(--s3) 0; border-bottom:1px solid var(--line-soft); }
+  .src-item:last-child { border-bottom:none; }
+  .src-n { flex:none; width:26px; height:26px; border-radius:var(--r1); background:var(--surface-3);
+           border:1px solid var(--line); color:var(--ink-2); font-family:var(--mono); font-size:11px;
+           display:grid; place-items:center; }
+  .src-title { font-weight:600; font-size:14.5px; line-height:1.42; }
+  .src-meta { margin-top:5px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;
+              font-size:11.5px; color:var(--ink-3); }
+  .badge { font-size:10.5px; padding:2px 7px; border-radius:var(--r1); border:1px solid var(--line);
+           background:var(--surface-2); color:var(--ink-2); letter-spacing:.2px; }
+  .badge.high { color:var(--ok); border-color:var(--ok-line); background:var(--ok-soft); }
+  .badge.med  { color:var(--warn); border-color:var(--warn-line); background:var(--warn-soft); }
+  .badge.safety { color:var(--bad); border-color:var(--bad-line); background:var(--bad-soft); font-weight:650; }
+  .src-meta .id { font-family:var(--mono); }
+
+  .actions { display:flex; gap:var(--s2); flex-wrap:wrap; margin-top:var(--s5); }
+  .btn { font-size:13px; padding:8px 15px; border-radius:var(--r2); cursor:pointer; color:var(--ink-2);
+         border:1px solid var(--line); background:var(--surface-2); transition:all .12s; }
+  .btn:hover { color:var(--ink); border-color:var(--accent); }
+
+  /* ---- engineering ---- */
+  .eng { margin-top:var(--s5); padding-top:var(--s2); border-top:1px dashed var(--line); }
+  table.ev { width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.ev th { text-align:left; padding:7px 10px; color:var(--ink-3); font-size:10.5px;
+                font-weight:650; letter-spacing:.8px; text-transform:uppercase; border-bottom:1px solid var(--line); }
+  table.ev td { padding:8px 10px; border-bottom:1px solid var(--line-soft); }
+  table.ev tr.uncited td { color:var(--ink-3); }
+  .tag-cited { color:var(--ok); font-weight:650; }
+  .sigrow { display:grid; grid-template-columns:180px 1fr 42px; gap:var(--s3); align-items:center;
+            font-size:12px; margin-bottom:6px; color:var(--ink-2); }
+  .bar { height:6px; border-radius:3px; background:var(--surface-3); overflow:hidden; }
+  .bar span { display:block; height:100%; background:var(--accent); border-radius:3px; }
+
+  /* ---- empty state ---- */
+  .empty { margin-top:var(--s5); display:grid; grid-template-columns:1fr 1fr; gap:var(--s2); }
+  .ecard { border:1px solid var(--line); border-radius:var(--r3); background:var(--surface); padding:var(--s4); }
+  .ecard h4 { margin:0 0 var(--s2); font-size:10.5px; font-weight:700; letter-spacing:1.1px;
+              text-transform:uppercase; color:var(--ink-3); }
+  .ecard ul { margin:0; padding-left:18px; color:var(--ink-2); font-size:13.5px; }
+  .ecard li { margin-bottom:5px; }
+  .covbar { display:flex; align-items:center; gap:var(--s3); font-size:12.5px; margin-bottom:5px; color:var(--ink-2); }
+  .covbar .nm { width:150px; flex:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .covbar .tr { flex:1; height:6px; border-radius:3px; background:var(--surface-3); overflow:hidden; }
+  .covbar .tr span { display:block; height:100%; background:var(--accent); opacity:.75; border-radius:3px; }
+  .covbar .ct { width:44px; text-align:right; font-family:var(--mono); font-size:11.5px; color:var(--ink-3); }
+
+  /* ---- skeleton ---- */
+  .sk { height:13px; border-radius:5px; margin-bottom:10px;
+        background:linear-gradient(90deg,var(--surface-2),var(--surface-3),var(--surface-2));
+        background-size:220% 100%; animation:sh 1.15s ease-in-out infinite; }
+  @keyframes sh { 0%{background-position:120% 0} 100%{background-position:-20% 0} }
+
+  /* ---- history ---- */
+  #history { margin-top:var(--s6); }
+  .hist { display:flex; gap:var(--s3); align-items:center; padding:9px 0; font-size:13.5px;
+          color:var(--ink-2); border-bottom:1px solid var(--line-soft); cursor:pointer; }
+  .hist:hover { color:var(--ink); }
+  .hist .dot { width:6px; height:6px; border-radius:50%; flex:none; }
+  .hist .txt { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* ---- dialog ---- */
+  dialog { border:1px solid var(--line); border-radius:var(--r3); background:var(--surface); color:var(--ink);
+           max-width:780px; width:94%; padding:0; box-shadow:var(--shadow); }
+  dialog::backdrop { background:rgba(2,6,10,.66); backdrop-filter:blur(2px); }
+  .dlg-head { position:sticky; top:0; background:var(--surface-2); padding:var(--s3) var(--s4);
+              border-bottom:1px solid var(--line); display:flex; justify-content:space-between;
+              align-items:center; gap:var(--s3); }
+  .dlg-head strong { font-family:var(--mono); font-size:13px; }
+  .dlg-body { padding:var(--s2) var(--s4) var(--s4); max-height:70vh; overflow:auto; }
+  .field { display:grid; grid-template-columns:minmax(0,220px) minmax(0,1fr); gap:var(--s4);
+           padding:9px 0; border-bottom:1px solid var(--line-soft); font-size:13.5px; }
+  .field .k, .field .v { overflow-wrap:anywhere; }
+  .field .k { color:var(--ink-3); font-family:var(--mono); font-size:12px; }
+  .field .v.sentinel { color:var(--ink-3); font-style:italic; }
+
+  footer { max-width:960px; margin:0 auto; padding:0 var(--s5) var(--s6); color:var(--ink-3);
+           font-size:12px; line-height:1.65; }
+
+  /* ================= phone ================= */
+  @media (max-width:660px) {
+    .appbar-inner { padding:10px var(--s4); gap:var(--s3); flex-wrap:wrap; }
+    .rail { width:100%; margin-left:0; justify-content:flex-start; gap:var(--s2); }
+    main { padding:var(--s4) var(--s4) 60px; }
+    .askrow { flex-direction:column; }
+    #go { width:100%; padding:15px; font-size:16px; }
+    .empty { grid-template-columns:1fr; }
+    .facts { grid-template-columns:1fr; }
+    .field { grid-template-columns:1fr; gap:2px; }
+    .sigrow { grid-template-columns:120px 1fr 38px; }
+    table.ev th:nth-child(4), table.ev td:nth-child(4) { display:none; }
+    .covbar .nm { width:110px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
+  @media print {
+    .appbar,.console,.actions,#history,.eng,footer,.empty { display:none !important; }
+    body { background:#fff; color:#000; }
+    .card { border:1px solid #999; box-shadow:none; border-left-width:3px; }
+    /* A printed sheet ends up in a logbook or stapled to a work order, so it
+       has to stand alone: which system, which knowledge base, and when. */
+    .printhead { display:block; border-bottom:1px solid #999; padding-bottom:8px; margin-bottom:14px; }
+    .printhead h2 { margin:0; font-size:14px; }
+    .printhead p { margin:2px 0 0; font-size:10.5px; color:#444; }
+    .qline { border-bottom:1px solid #ccc; }
+    a { color:#000; text-decoration:none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="appbar"><div class="appbar-inner">
+  <div class="brandgroup">
+    <div class="mark" aria-hidden="true">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)">
+        <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z"/>
+      </svg>
+    </div>
+    <div class="titles">
+      <h1>Substation O&amp;M Assistant</h1>
+      <p>Evidence-grounded answers from CEA and BHEL O&amp;M documents</p>
+    </div>
+  </div>
+  <div class="rail" id="rail"></div>
+  <label class="switch" title="Show retrieval scores, gate signals and uncited evidence">
+    <input type="checkbox" id="engmode"> Detail
+  </label>
+</div></div>
+
+<main>
+  <div class="printhead">
+    <h2>Substation O&amp;M Assistant</h2>
+    <p><span id="printkb">KB_v1.1</span> &middot; printed <span id="printwhen"></span> &middot;
+       generated from cited knowledge base records; verify against the source document before acting.</p>
+  </div>
+
+  <section class="console">
+    <div class="field-label">Question <span>press <kbd>/</kbd> to focus</span></div>
+    <div class="askrow">
+      <input id="q" type="text" maxlength="1000" autocomplete="off" enterkeyhint="search"
+             aria-label="Your question"
+             placeholder="What is the inspection interval for transformer bushings?">
+      <button id="go">Ask</button>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="field-label">Equipment context <span>optional &mdash; narrows retrieval</span></div>
+    <div class="chips" id="equip"></div>
+    <div class="effective" id="effective" hidden></div>
+
+    <div class="divider"></div>
+
+    <div class="field-label">Examples</div>
+    <div class="chips">
+      <button class="chip ex" data-q="How often should transformer insulating oil be tested for BDV?">maintenance interval</button>
+      <button class="chip ex" data-q="What safety precautions apply before working on a circuit breaker?">safety precaution</button>
+      <button class="chip ex" data-q="What is the recommended torque for a 400 kV GIS flange bolt?">outside the knowledge base</button>
+      <button class="chip ex" data-q="What is the maintenance interval?">ambiguous question</button>
+    </div>
+  </section>
+
+  <div id="out" aria-live="polite"></div>
+
+  <section class="empty" id="empty">
+    <div class="ecard">
+      <h4>What this does</h4>
+      <ul>
+        <li>Answers from 9 verified CEA and BHEL O&amp;M documents, nothing else</li>
+        <li>Cites the document, section and page behind every statement</li>
+        <li>Surfaces the interval, limit and safety text from the source record</li>
+      </ul>
+    </div>
+    <div class="ecard">
+      <h4>What it will not do</h4>
+      <ul>
+        <li>Answer from general knowledge when the documents are silent &mdash; it says so instead</li>
+        <li>Guess at an ambiguous question &mdash; it asks which equipment you mean</li>
+        <li>Replace the permit-to-work procedure or a competent person's judgement</li>
+      </ul>
+    </div>
+    <div class="ecard" style="grid-column:1/-1">
+      <h4>Knowledge base coverage</h4>
+      <div id="coverage" class="subtle">loading&hellip;</div>
+    </div>
+  </section>
+
+  <section id="history" hidden>
+    <div class="sect"><h3>This session</h3><div class="rule"></div></div>
+    <div id="hist-list"></div>
+  </section>
+</main>
+
+<footer>
+  Generated only from retrieved chunks of the frozen knowledge base (KB_v1.1, <span id="kbn">&mdash;</span> chunks;
+  Central Electricity Authority / Ministry of Power and BHEL). Intervals, limits and safety text are read from
+  the knowledge base record, not from generated text. API reference at <a href="/docs">/docs</a>.
+</footer>
+
+<dialog id="dlg">
+  <div class="dlg-head">
+    <strong id="dlg-title">Evidence</strong>
+    <button class="btn" onclick="document.getElementById('dlg').close()">Close</button>
+  </div>
+  <div class="dlg-body" id="dlg-body"></div>
+</dialog>
+
+<script>
+const SENTINELS = new Set(["NOT VERIFIED","NOT COVERED","NOT APPLICABLE","N/A",""]);
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+let FACETS = null, selectedEquipment = null, lastPayload = null;
+const history_ = [];
+const STATUS_COLOUR = {ANSWER:"var(--ok)", INSUFFICIENT_EVIDENCE:"var(--warn)",
+                       NEEDS_CLARIFICATION:"var(--accent)"};
+
+/* ================= boot ================= */
+async function boot() {
+  try {
+    const h = await (await fetch("/health")).json();
+    // Chunk count and gate state stay in the masthead: one is scope, the other
+    // is an honesty requirement. top-k and the model name are run telemetry —
+    // they belong with the rest of the engineering detail, not in the chrome a
+    // technician looks at.
+    $("rail").innerHTML =
+      `<span class="stat">KB <b class="num">${h.kb_chunks}</b></span>` +
+      `<span class="stat" data-eng>top-k <b class="num">${h.top_k}</b></span>` +
+      `<span class="stat" data-eng>model <b>${esc(h.llm.model)}</b></span>` +
+      // Shown whether or not it flatters the system. Implying a calibrated
+      // confidence layer that has not been fitted is the overclaim this
+      // project exists to avoid.
+      (h.gated ? `<span class="chipflag">gate <b>calibrated</b></span>`
+               : `<span class="chipflag warn">gate <b>not calibrated</b></span>`) +
+      (h.llm.ready ? "" : `<span class="chipflag bad">model unavailable</span>`);
+    $("kbn").textContent = h.kb_chunks;
+    $("printkb").textContent = `KB_v1.1 · ${h.kb_chunks} chunks`;
+  } catch (e) {
+    $("rail").innerHTML = `<span class="chipflag bad">service unreachable</span>`;
+  }
+  applyEngVisibility();
+  try {
+    FACETS = await (await fetch("/facets")).json();
+    $("equip").innerHTML = FACETS.equipment.slice(0, 10).map(e =>
+      `<button class="chip eq" aria-pressed="false" data-eq="${esc(e.name)}">${esc(e.name)}<span class="n">${e.chunks}</span></button>`).join("");
+    document.querySelectorAll(".eq").forEach(el => el.addEventListener("click", () => pickEquipment(el)));
+    renderCoverage();
+  } catch (e) { $("coverage").textContent = "coverage unavailable"; }
+}
+
+// Coverage as proportion, not a bare list: a corpus is never uniform, and
+// seeing that it is transformer-heavy is what stops someone assuming a
+// question about relay panels must be answerable.
+function renderCoverage() {
+  const top = FACETS.equipment.slice(0, 8);
+  const max = Math.max(...top.map(e => e.chunks), 1);
+  $("coverage").innerHTML = top.map(e =>
+    `<div class="covbar"><span class="nm">${esc(e.name)}</span>
+      <span class="tr"><span style="width:${Math.round(e.chunks/max*100)}%"></span></span>
+      <span class="ct">${e.chunks}</span></div>`).join("") +
+    `<div class="subtle" style="margin-top:10px">${FACETS.total_chunks} chunks across
+     ${FACETS.documents.length} documents. Equipment outside this list is likely outside the corpus.</div>`;
+}
+
+function pickEquipment(el) {
+  const eq = el.dataset.eq;
+  selectedEquipment = (selectedEquipment === eq) ? null : eq;
+  document.querySelectorAll(".eq").forEach(x =>
+    x.setAttribute("aria-pressed", String(x.dataset.eq === selectedEquipment)));
+  showEffective();
+}
+
+// The retriever reads equipment from the question text, so context is applied
+// by appending it. Showing the string that will actually be sent keeps that
+// visible rather than magic.
+function effectiveQuery() {
+  const q = $("q").value.trim();
+  return selectedEquipment && q ? `${q} (${selectedEquipment})` : q;
+}
+function showEffective() {
+  const eff = effectiveQuery();
+  if (selectedEquipment && eff) { $("effective").hidden = false; $("effective").innerHTML = `Sent as <code>${esc(eff)}</code>`; }
+  else $("effective").hidden = true;
+}
+
+/* ================= ask ================= */
+async function ask() {
+  const question = effectiveQuery();
+  if (!question) { $("q").focus(); return; }
+  $("go").disabled = true;
+  $("go").textContent = "Asking…";
+  $("empty").hidden = true;
+  $("out").innerHTML = `<div class="card"><div class="card-body">
+      <div class="sk" style="width:32%"></div><div class="sk" style="width:88%"></div>
+      <div class="sk" style="width:74%"></div><div class="sk" style="width:44%"></div></div></div>`;
+  try {
+    const r = await fetch("/ask", {method:"POST", headers:{"Content-Type":"application/json"},
+                                   body: JSON.stringify({question})});
+    const body = await r.json();
+    if (!r.ok) { renderFailure(r.status, body); remember(question, "ERROR"); }
+    else { lastPayload = body; render(body); remember(question, body.status); }
+  } catch (e) {
+    renderFailure(0, {detail:String(e)});
+  } finally { $("go").disabled = false; $("go").textContent = "Ask"; }
+}
+
+function remember(q, status) {
+  history_.unshift({q, status});
+  $("history").hidden = false;
+  $("hist-list").innerHTML = history_.map((h,i) =>
+    `<div class="hist" data-i="${i}"><span class="dot" style="background:${STATUS_COLOUR[h.status]||"var(--bad)"}"></span>
+     <span class="txt">${esc(h.q)}</span></div>`).join("");
+  document.querySelectorAll(".hist").forEach(el => el.addEventListener("click", () => {
+    $("q").value = history_[+el.dataset.i].q; showEffective(); ask();
+  }));
+}
+
+/* A provider failure is NOT an abstention. Rendering it as one would claim the
+   knowledge base lacked evidence when nothing was ever asked of it. */
+function renderFailure(code, body) {
+  const detail = body && body.detail
+    ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail, null, 2))
+    : "unknown error";
+  $("out").innerHTML = `<div class="card infra">
+    <div class="card-head"><span class="verdict">Service error${code ? " &middot; " + code : ""}</span>
+      <span class="subtle">a fault in the system, not a finding about the knowledge base</span></div>
+    <div class="card-body">
+      <div class="note">Nothing was answered and no evidence was consulted. The knowledge base has not been
+      searched &mdash; this must not be read as &ldquo;no information available&rdquo;.</div>
+      <pre class="note mono" style="white-space:pre-wrap;font-size:12.5px;margin-top:14px">${esc(detail)}</pre>
+    </div></div>`;
+}
+
+const VERDICTS = {
+  ANSWER:                {cls:"answer",  label:"Answer",              blurb:"grounded in the cited sources"},
+  INSUFFICIENT_EVIDENCE: {cls:"abstain", label:"No answer given",     blurb:"the knowledge base does not support one"},
+  NEEDS_CLARIFICATION:   {cls:"clarify", label:"Needs clarification", blurb:"the question is ambiguous as asked"},
+  UNSUPPORTED:           {cls:"unsup",   label:"Withheld",            blurb:"could not be tied to retrieved evidence"},
+  PARSE_ERROR:           {cls:"unsup",   label:"Unusable reply",      blurb:"the model's reply could not be parsed"},
+};
+
+function render(b) {
+  const v = VERDICTS[b.status] || {cls:"unsup", label:b.status, blurb:""};
+  const cited = new Set((b.citations||[]).map(c => c.chunk_id));
+
+  // The question is repeated inside the card on purpose. Printing hides the
+  // input console, and a printed sheet showing an answer with no question is
+  // useless in a logbook or attached to a work order — which is exactly what
+  // the Print button is for.
+  let h = `<div class="card ${v.cls}"><div class="card-head">
+      <span class="verdict">${esc(v.label)}</span><span class="subtle">${esc(v.blurb)}</span>
+      <span style="margin-left:auto" class="chipflag">${b.gated ? "gated" : "ungated"}</span>
+    </div><div class="card-body">
+    <div class="qline"><span class="qlabel">Question</span> ${esc(b.question)}</div>`;
+
+  // 1. Safety first, verbatim from the cited KB records.
+  if (b.safety_notes && b.safety_notes.length) {
+    h += `<div class="safety"><h4>Safety information recorded in the cited source</h4>` +
+      b.safety_notes.map(n => `<p>${esc(n.text)}<br><span class="src">${esc(n.label)} &middot; ${esc(n.chunk_id)}</span></p>`).join("") +
+      `<div class="caveat">Quoted verbatim from the knowledge base. It does not replace the site
+       permit-to-work procedure or a competent person's assessment.</div></div>`;
+  }
+
+  // 2. The answer.
+  if (b.status === "ANSWER") {
+    h += `<div class="answer-text">${linkLabels(b.answer, b.citations)}</div>` + keyFacts(b.citations);
+  } else if (b.status === "INSUFFICIENT_EVIDENCE") {
+    h += `<div class="note"><b>No answer is given.</b> The retrieved evidence does not support one` +
+         (b.missing_information ? `: ${esc(b.missing_information)}` : ".") + `</div>` + coverageHint();
+  } else if (b.status === "NEEDS_CLARIFICATION") {
+    h += `<div class="answer-text">${esc(b.clarification_question || "Could you narrow the question?")}</div>`;
+  } else {
+    h += `<div class="note">${esc(b.downgrade_reason || b.display_text || "")}</div>`;
+  }
+
+  if (b.warning) h += `<div class="subtle" style="margin-top:16px">${esc(b.warning)}</div>`;
+
+  // 3. Sources with provenance.
+  if (b.citations && b.citations.length) {
+    h += `<div class="sect"><h3>Sources &middot; ${b.citations.length}</h3><div class="rule"></div></div>`;
+    b.citations.forEach((c, i) => {
+      const auth = (c.authority_level||"").toUpperCase();
+      h += `<div class="src-item">
+        <div class="src-n">${esc(c.label)}</div>
+        <div style="min-width:0">
+          <div class="src-title"><a onclick="showEvidence('${esc(c.chunk_id)}')">${esc(c.document_title)}</a></div>
+          <div class="src-meta">
+            <span class="badge ${auth==="HIGH"?"high":auth==="MEDIUM"?"med":""}">${esc(auth||"—")}</span>
+            ${c.knowledge_type ? `<span class="badge ${c.knowledge_type==="SAFETY"?"safety":""}">${esc(c.knowledge_type)}</span>` : ""}
+            <span>${esc(c.organization)}</span><span>&middot;</span>
+            <span>${esc(c.section||"—")}</span><span>&middot;</span>
+            <span>${esc(c.page||"—")}</span><span>&middot;</span>
+            <span class="id">${esc(c.chunk_id)}</span>
+          </div>
+        </div></div>`;
+      void i;
+    });
+  }
+
+  h += `<div class="actions">
+      <button class="btn" onclick="copyAnswer()">${b.status === "ANSWER" ? "Copy answer and sources" : "Copy result"}</button>
+      <button class="btn" onclick="window.print()">Print</button>
+    </div>` + engineering(b, cited) + `</div></div>`;
+  $("out").innerHTML = h;
+  applyEngVisibility();
+}
+
+// Operational payload, straight from the KB fields of the cited chunks.
+function keyFacts(citations) {
+  const freq = [], lim = [];
+  for (const c of citations || []) {
+    if (c.frequency && !freq.some(f => f.v === c.frequency)) freq.push({v:c.frequency, s:c.label});
+    if (c.technical_limit_value && !lim.some(f => f.v === c.technical_limit_value)) lim.push({v:c.technical_limit_value, s:c.label});
+  }
+  if (!freq.length && !lim.length) return "";
+  let h = `<div class="facts">`;
+  for (const f of freq) h += `<div class="fact"><div class="k">Interval</div><div class="v">${esc(f.v)}</div><div class="s">${esc(f.s)}</div></div>`;
+  for (const f of lim)  h += `<div class="fact"><div class="k">Limit / value</div><div class="v">${esc(f.v)}</div><div class="s">${esc(f.s)}</div></div>`;
+  return h + `</div>`;
+}
+
+// An abstention should be a useful dead end, not a blank one — without
+// implying an answer exists somewhere.
+function coverageHint() {
+  if (!FACETS) return "";
+  const top = FACETS.equipment.slice(0, 6).map(e => `${esc(e.name)} (${e.chunks})`).join(" &middot; ");
+  return `<div class="subtle" style="margin-top:14px">Strongest coverage: ${top}. If your equipment is not
+    listed, the answer is likely outside these ${FACETS.total_chunks} chunks — consult the OEM manual or your
+    supervisor rather than assuming none exists.</div>`;
+}
+
+function linkLabels(text, citations) {
+  const by = {};
+  for (const c of citations || []) by[c.label] = c.chunk_id;
+  return esc(text).replace(/\[(E\d+)\]/g, (m, l) =>
+    by[l] ? `<span class="ev-label" onclick="showEvidence('${by[l]}')">${l}</span>` : m);
+}
+
+/* ================= engineering detail ================= */
+function engineering(b, cited) {
+  let h = `<div class="eng" data-eng>`;
+  if (b.gate) {
+    h += `<div class="sect"><h3>Confidence gate</h3><div class="rule"></div></div>
+      <div class="subtle">decision <b>${esc(b.gate.decision)}</b>` +
+      (b.gate.confidence != null ? ` &middot; score <span class="num">${b.gate.confidence.toFixed(3)}</span>` : "") +
+      ` &middot; ${esc(b.gate.reason)}</div>`;
+    if (b.gate.signals) {
+      h += `<div style="margin-top:12px">`;
+      for (const [k, val] of Object.entries(b.gate.signals))
+        h += `<div class="sigrow"><span>${esc(k)}</span><span class="bar"><span style="width:${Math.round(val*100)}%"></span></span><span class="num">${val.toFixed(2)}</span></div>`;
+      h += `</div>`;
+    }
+  }
+  if (b.evidence_considered && b.evidence_considered.length) {
+    h += `<div class="sect"><h3>Retrieved evidence &middot; ${b.evidence_considered.length}</h3><div class="rule"></div></div>
+      <table class="ev"><tr><th>#</th><th>Chunk</th><th>Score</th><th>Equipment</th><th>Used</th></tr>`;
+    for (const e of b.evidence_considered) {
+      const used = cited.has(e.chunk_id);
+      h += `<tr class="${used?"":"uncited"}"><td class="num">${e.rank}</td>
+        <td class="mono"><a onclick="showEvidence('${esc(e.chunk_id)}')">${esc(e.chunk_id)}</a></td>
+        <td class="num">${e.score.toFixed(3)}</td><td>${esc(e.equipment||"—")}</td>
+        <td class="${used?"tag-cited":""}">${used?"cited":"not cited"}</td></tr>`;
+    }
+    h += `</table><div class="subtle" style="margin-top:10px">Rows marked &ldquo;not cited&rdquo; were retrieved
+      and shown to the model, which chose not to rely on them. That is what makes an abstention checkable.</div>`;
+  }
+  h += `<div class="sect"><h3>Run</h3><div class="rule"></div></div>
+    <div class="subtle mono" style="font-size:12px">${esc(b.llm.provider)} / ${esc(b.llm.model)} &middot;
+    retrieval ${b.timing_ms.retrieval} ms &middot; generation ${b.timing_ms.generation} ms &middot;
+    total ${b.timing_ms.total} ms</div>`;
+  return h + `</div>`;
+}
+
+function applyEngVisibility() {
+  const on = $("engmode").checked;
+  document.querySelectorAll("[data-eng]").forEach(el => el.style.display = on ? "" : "none");
+}
+
+/* ================= copy ================= */
+function copyAnswer() {
+  if (!lastPayload) return;
+  const b = lastPayload, lines = [b.question, ""];
+  if (b.safety_notes && b.safety_notes.length) {
+    lines.push("SAFETY INFORMATION RECORDED IN THE CITED SOURCE:");
+    b.safety_notes.forEach(n => lines.push("  - " + n.text));
+    lines.push("");
+  }
+  lines.push(b.status === "ANSWER" ? b.answer : b.display_text, "");
+  if (b.citations && b.citations.length) {
+    lines.push("Sources:");
+    b.citations.forEach(c => lines.push(
+      `  [${c.label}] ${c.document_title} — ${c.section||""} ${c.page||""} — ${c.organization} (${c.authority_level}) — ${c.chunk_id}`));
+  }
+  const text = lines.join("\n");
+  if (navigator.clipboard) navigator.clipboard.writeText(text);
+  else { const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
+}
+
+/* ================= evidence viewer ================= */
+const FIELD_ORDER = ["chunk_id","document_title","document_id","organization","authority_level",
+  "source_section","pdf_page","equipment","equipment_subtype","topic","subtopic","knowledge_type",
+  "verified_information","procedure","frequency","technical_limit_value","safety_information",
+  "troubleshooting_failure_information","applicability","notes","original_filename"];
+
+async function showEvidence(chunkId) {
+  $("dlg-title").textContent = chunkId;
+  $("dlg-body").innerHTML = `<div class="sk" style="margin-top:16px;width:60%"></div><div class="sk" style="width:90%"></div>`;
+  $("dlg").showModal();
+  try {
+    const r = await fetch(`/evidence/${encodeURIComponent(chunkId)}`);
+    if (!r.ok) { $("dlg-body").innerHTML = `<div class="note" style="padding-top:16px">No such chunk in the knowledge base.</div>`; return; }
+    const c = await r.json();
+    const keys = FIELD_ORDER.filter(k => k in c).concat(Object.keys(c).filter(k => !FIELD_ORDER.includes(k)));
+    // Sentinels are shown greyed, not hidden. "NOT VERIFIED" is a fact about
+    // the KB; concealing it would make coverage look better than it is.
+    $("dlg-body").innerHTML = keys.map(k => {
+      const val = c[k], sent = SENTINELS.has(String(val ?? "").trim().toUpperCase());
+      return `<div class="field"><div class="k">${esc(k)}</div><div class="v ${sent?"sentinel":""}">${esc(val)||"—"}</div></div>`;
+    }).join("");
+  } catch (e) { $("dlg-body").innerHTML = `<div class="note" style="padding-top:16px">${esc(e)}</div>`; }
+}
+
+/* ================= wiring ================= */
+$("go").addEventListener("click", ask);
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") ask(); });
+$("q").addEventListener("input", showEffective);
+$("engmode").addEventListener("change", applyEngVisibility);
+document.addEventListener("keydown", e => {
+  const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+  if (e.key === "/" && !typing) { e.preventDefault(); $("q").focus(); $("q").select(); }
+  if (e.key === "Escape" && document.activeElement === $("q")) $("q").blur();
+});
+window.addEventListener("beforeprint", () => {
+  $("printwhen").textContent = new Date().toLocaleString();
+});
+document.querySelectorAll(".ex").forEach(el =>
+  el.addEventListener("click", () => { $("q").value = el.dataset.q; showEffective(); ask(); }));
+boot();
+</script>
+</body>
+</html>
