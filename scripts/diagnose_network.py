@@ -13,14 +13,21 @@ layers in order and stops being useful only where it actually breaks:
     5. TCP       can we open port 443?
     6. TLS       does the handshake succeed, and WHO signed the certificate?
     7. HTTP      does an UNauthenticated request reach the API?
-    8. auth      does an authenticated request work via raw httpx...
-    9. SDK       ...and via the OpenAI SDK?
+    8. auth      does an authenticated request work via raw httpx?
+    9. client    does the project's own client build?
+   10. generate  does a real generation succeed?
 
 Steps 8 and 9 are separate on purpose. If raw httpx succeeds with the same key
-and the SDK does not, then the key, the route and TLS are all fine and the
-fault is in the SDK's own HTTP stack — a completely different fix from
-anything network-related. `APIConnectionError` is a wrapper; step 9 unwraps
-the cause chain, because the wrapper's name is never the actual failure.
+and the project's client does not, the key, route and TLS are all fine and the
+fault is in the client stack — a completely different fix from anything
+network-related. `APIConnectionError` is a wrapper; the cause chain is
+unwrapped, because the wrapper's name is never the actual failure.
+
+Step 10 exists because an earlier version of this script passed every check
+against a key with no credit. Listing models is free; generating is not. Only
+a real generation proves the system can actually run, so the diagnostic makes
+one — and step 9 uses `client_from_env()`, the same call the evaluation runner
+makes, so the diagnostic cannot pass on a path the application never uses.
 
 The TLS step is the one that catches the failure most people miss. Campus and
 corporate networks frequently intercept HTTPS with their own certificate
@@ -254,35 +261,51 @@ def main() -> int:
         print("       network refusing authenticated traffic, not the SDK.")
         return 1
 
-    # --- the SDK itself ------------------------------------------------
-    step("Authenticated request via the OpenAI SDK")
+    # --- the project's own client ----------------------------------------
+    # Deliberately the REAL path — client_from_env(), the same call the
+    # evaluation runner makes. A diagnostic that constructs its own client
+    # tests a code path the application never uses, and can pass while the
+    # application fails.
+    step("The project's own client (src.generation.llm.client_from_env)")
     try:
-        from openai import OpenAI
+        from src.generation.llm import client_from_env
 
-        client = OpenAI(api_key=key, timeout=20)
-        models = client.models.list()
-        names = [m.id for m in models.data][:3]
-        print(f"{OK}SDK works — {len(models.data)} models, e.g. {', '.join(names)}")
+        client = client_from_env()
+        print(f"{OK}built: provider={client.provider} model={client.model}")
     except Exception as e:
-        print(f"{BAD}{type(e).__name__}: {str(e)[:200]}")
-        # openai wraps the real failure; the wrapper name is never the cause.
+        print(f"{BAD}{type(e).__name__}: {str(e)[:300]}")
         cause, depth = e.__cause__ or e.__context__, 0
         while cause is not None and depth < 6:
             print(f"       caused by: {type(cause).__name__}: {str(cause)[:200]}")
             cause = cause.__cause__ or cause.__context__
             depth += 1
+        return 1
+
+    # --- an actual generation --------------------------------------------
+    # THE STEP THAT WAS MISSING. Every check above can pass on a key with no
+    # credit, because listing models is free and generating is not. The first
+    # real evidence of a quota problem is a generation, so the diagnostic has
+    # to make one.
+    step("A real generation (the only check that detects an empty quota)")
+    try:
+        resp = client.complete(
+            [{"role": "user", "content": "Reply with the single word: ready"}]
+        )
+        text = (resp.text or "").strip()
+        print(f"{OK}model replied {text[:40]!r}")
+        if resp.completion_tokens is not None:
+            print(f"       tokens: {resp.prompt_tokens} in / {resp.completion_tokens} out")
+    except Exception as e:
+        print(f"{BAD}{str(e)[:600]}")
         if raw_ok:
             print()
-            print("       Raw httpx with the same key succeeded, so the key, the")
-            print("       network and TLS are all fine — the SDK's own HTTP client")
-            print("       is what fails. Usually one of:")
-            print("         - an old/conflicting httpx: pip install -U openai httpx")
-            print("         - a stale openai version:   pip show openai")
-            print("         - antivirus or endpoint security filtering the process")
+            print("       Note: reads succeeded earlier. Listing models is free and")
+            print("       generating is not, so a key can pass every connectivity")
+            print("       check and still fail here.")
         return 1
 
     print("\n" + "=" * 70)
-    print("ALL CHECKS PASSED — the live evaluation should run.")
+    print("ALL CHECKS PASSED — including a real generation.")
     print("  python experiments/run_generation_eval.py --live --limit 3")
     print("=" * 70)
     return 0

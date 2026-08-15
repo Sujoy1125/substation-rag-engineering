@@ -101,6 +101,47 @@ class LLMClient(ABC):
         return self.availability_error() is None
 
 
+def explain_api_error(e: BaseException) -> str:
+    """Turn a provider exception into something that names the actual problem.
+
+    An API failure and a network failure are different problems with different
+    fixes, and "request failed" sends the reader to the firewall regardless.
+    A 429 in particular is easy to misread: the key is valid, the network is
+    fine, the account simply has no credit — and no amount of debugging
+    connectivity will change that.
+    """
+    msg = str(e)
+    status = getattr(e, "status_code", None)
+    blob = f"{status} {msg}".lower()
+
+    if "429" in blob or "quota" in blob or "insufficient_quota" in blob:
+        return (
+            "OpenAI returned 429 — the API key is valid but the account has no "
+            "credit or has hit its quota. This is a billing state, not a network "
+            "or code problem; nothing in this repository can work around it.\n"
+            "  Add credit: https://platform.openai.com/settings/organization/billing\n"
+            "  Then re-run. Note that listing models is free, so a key can pass "
+            "every connectivity check and still fail on the first generation."
+        )
+    if "401" in blob or "invalid_api_key" in blob or "unauthorized" in blob:
+        return (
+            "OpenAI returned 401 — the key is rejected. Revoked, mistyped, or "
+            "belongs to a different account.\n"
+            "  New key: https://platform.openai.com/api-keys"
+        )
+    if "404" in blob and "model" in blob:
+        return (
+            f"OpenAI returned 404 for the model. Check OPENAI_MODEL in .env is a "
+            f"model your account can use."
+        )
+    if "connection" in blob or "timeout" in blob or "timed out" in blob:
+        return (
+            f"could not reach the API: {msg}\n"
+            "  Diagnose the layer: python scripts/diagnose_network.py"
+        )
+    return f"OpenAI request failed: {msg}"
+
+
 def assert_real_client(client: LLMClient) -> None:
     if not getattr(client, "is_real", False):
         raise MockClientInEvaluationError(
@@ -161,8 +202,37 @@ class OpenAIClient(LLMClient):
         kwargs = {"api_key": self._api_key, "timeout": self.timeout}
         if self._base_url:
             kwargs["base_url"] = self._base_url
+
+        # Supply the HTTP client explicitly rather than letting the SDK build
+        # its own. On Python 3.14 the SDK's default construction recurses until
+        # it blows the stack — thousands of frames deep, surfacing as a bare
+        # APIConnectionError("Connection error") indistinguishable from a
+        # firewall block, while an identical request through an httpx client we
+        # construct returns 200. Measured, not guessed: scripts/probe_sdk.py
+        # tries both and reports which works.
+        #
+        # This is also strictly more predictable. The SDK's default client
+        # picks up environment proxies and transport settings implicitly; ours
+        # is visible in this file.
+        try:
+            import httpx
+
+            kwargs["http_client"] = httpx.Client(timeout=self.timeout)
+        except ImportError:  # pragma: no cover - httpx ships with openai
+            pass
+
         self._client = OpenAI(**kwargs)
         return self._client
+
+    def close(self) -> None:
+        """Release the underlying HTTP connection pool."""
+        client = self._client
+        self._client = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def availability_error(self) -> Optional[str]:
         try:
@@ -203,9 +273,9 @@ class OpenAIClient(LLMClient):
                 try:
                     resp = client.chat.completions.create(**kwargs)
                 except Exception as e2:
-                    raise LLMUnavailableError(f"OpenAI request failed: {e2}") from e2
+                    raise LLMUnavailableError(explain_api_error(e2)) from e2
             else:
-                raise LLMUnavailableError(f"OpenAI request failed: {e}") from e
+                raise LLMUnavailableError(explain_api_error(e)) from e
         latency_ms = (time.perf_counter() - t0) * 1000
 
         usage = getattr(resp, "usage", None)
@@ -266,7 +336,16 @@ class AnthropicClient(LLMClient):
         if not self._api_key:
             raise LLMUnavailableError("ANTHROPIC_API_KEY is not set.")
         if self._client is None:
-            self._client = anthropic.Anthropic(api_key=self._api_key, timeout=self.timeout)
+            # Explicit HTTP client, for the same reason as OpenAIClient: the
+            # SDK's default construction recurses on Python 3.14.
+            kwargs = {"api_key": self._api_key, "timeout": self.timeout}
+            try:
+                import httpx
+
+                kwargs["http_client"] = httpx.Client(timeout=self.timeout)
+            except ImportError:  # pragma: no cover
+                pass
+            self._client = anthropic.Anthropic(**kwargs)
 
         system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
         turns = [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] != "system"]

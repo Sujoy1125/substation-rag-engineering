@@ -408,6 +408,53 @@ def test_answer_serialises_to_json_safe_dict():
 # --------------------------------------------------------------------------
 
 
+def test_quota_error_is_not_reported_as_a_network_problem():
+    """A 429 means the key works, the network works, and the account has no
+    credit. Reporting it as 'request failed' sends the reader to the firewall,
+    which is exactly what happened during the first live runs."""
+    from src.generation.llm import explain_api_error
+
+    msg = explain_api_error(
+        Exception("Error code: 429 - {'error': {'message': 'You exceeded your current quota'}}")
+    )
+    assert "no credit" in msg or "quota" in msg
+    assert "billing" in msg
+    assert "listing models is free" in msg.lower()
+
+
+def test_auth_error_points_at_the_key_not_the_network():
+    from src.generation.llm import explain_api_error
+
+    msg = explain_api_error(Exception("Error code: 401 - invalid_api_key"))
+    assert "401" in msg and "api-keys" in msg
+
+
+def test_connection_error_points_at_the_diagnostic():
+    from src.generation.llm import explain_api_error
+
+    msg = explain_api_error(Exception("Connection error."))
+    assert "diagnose_network" in msg
+
+
+def test_openai_client_supplies_its_own_http_client(monkeypatch):
+    """The SDK's default client construction recurses until the stack blows on
+    Python 3.14, surfacing as a bare 'Connection error'. Passing an explicit
+    httpx client is measured to work (scripts/probe_sdk.py)."""
+    pytest.importorskip("openai")
+    pytest.importorskip("httpx")
+    from src.generation.llm import OpenAIClient
+
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    OpenAIClient(api_key="sk-test")._ensure_client()
+    assert "http_client" in captured, "SDK was left to build its own client"
+
+
 def test_scripted_client_is_rejected_on_reported_result_paths():
     with pytest.raises(MockClientInEvaluationError):
         assert_real_client(ScriptedClient(["{}"]))
