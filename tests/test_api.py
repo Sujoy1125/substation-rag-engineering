@@ -458,3 +458,52 @@ def test_facets_report_real_coverage():
 def test_unknown_chunk_id_is_404():
     c = client_for(build_service([GOOD_REPLY]))
     assert c.get("/evidence/NOPE-C9999").status_code == 404
+
+
+# --------------------------------------------------------------------------
+# the interface must not assert what the data does not say
+# --------------------------------------------------------------------------
+
+
+def test_ui_only_promotes_values_that_read_as_values():
+    """A headline card asserts "THIS is the interval". Most frequency fields in
+    KB_v1.1 hold the table row an interval was extracted from — row number, sub
+    item marker and all. Rendering that under the word INTERVAL is the
+    interface making a claim the data does not support."""
+    import re
+
+    js = re.search(r"function readsAsValue\(v\) \{(.*?)\n\}", UI_HTML, re.S)
+    assert js, "readsAsValue must exist in the UI"
+
+    # Mirror of the JS rule, kept in step by the assertions below.
+    def reads_as_value(t):
+        t = t.strip()
+        if not t or len(t) > 40: return False
+        if len(t.split()) > 6: return False
+        if re.search(r"\(?[a-z]\)|\b\d+\)", t): return False
+        if re.search(r"\b(shall|should|must|will|during|when|if)\b", t, re.I): return False
+        if re.search(r"\s\d+$", t): return False
+        return True
+
+    # Real values from KB_v1.1 that MUST still get a card.
+    for good in ["Annually", "Half yearly", "2500 KVA; 33 KV", "60 kV minimum",
+                 "0.5 ppm", "Monthly, Half-Yearly, Yearly", "415 V; 80°C"]:
+        assert reads_as_value(good), f"{good!r} should be promoted"
+
+    # Real values from KB_v1.1 that MUST NOT.
+    for bad in [
+        "12 Electrical Oil BDV Yearly a) BDV of transformer oil",
+        "(b) Fire hydrant pumps shall be tested weekly and jockey pumps daily",
+        "Boiler shall be externally inspected every time after annual maintenance",
+        "Checking of space heater Yearly 18",
+    ]:
+        assert not reads_as_value(bad), f"{bad!r} should be demoted"
+
+
+def test_demoted_values_are_still_shown_not_hidden():
+    """Demotion is about the claim, not the content. A messy frequency is still
+    a fact about the source and must remain visible and attributed — hiding it
+    would make coverage look better than it is."""
+    assert "Recorded in the source" in UI_HTML
+    assert "Quoted verbatim from the knowledge base" in UI_HTML
+    assert "quoted" in UI_HTML

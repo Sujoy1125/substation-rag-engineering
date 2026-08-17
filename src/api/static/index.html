@@ -192,6 +192,16 @@
   .fact .k { font-size:10.5px; font-weight:650; letter-spacing:1px; text-transform:uppercase; color:var(--ink-3); }
   .fact .v { font-size:20px; font-weight:650; margin-top:3px; letter-spacing:-.3px; }
   .fact .s { font-size:11px; color:var(--ink-3); margin-top:2px; font-family:var(--mono); }
+  /* The demoted form: readable, attributed, and making no claim to be a
+     tidy value. Deliberately not styled like a card. */
+  .quoted { display:flex; gap:var(--s3); align-items:baseline; padding:7px 0;
+            border-bottom:1px solid var(--line-soft); font-size:14px; }
+  .quoted:last-of-type { border-bottom:none; }
+  .quoted .qk { flex:none; width:110px; font-size:10.5px; font-weight:650; letter-spacing:.9px;
+                text-transform:uppercase; color:var(--ink-3); }
+  .quoted .qv { flex:1; min-width:0; }
+  .quoted .qs { flex:none; font-family:var(--mono); font-size:11.5px; color:var(--ink-3); }
+  @media (max-width:660px) { .quoted { flex-wrap:wrap; } .quoted .qk { width:100%; } }
 
   /* ---- labels, sections, sources ---- */
   .ev-label { display:inline-block; font-family:var(--mono); font-size:11.5px; font-weight:600;
@@ -608,17 +618,60 @@ function render(b) {
 }
 
 // Operational payload, straight from the KB fields of the cited chunks.
+// A headline card asserts "THIS is the interval". Most of these fields do not
+// contain an interval — they contain the table row the interval was extracted
+// from, complete with row numbers and sub-item markers. Measured against
+// KB_v1.1: only 15 of 72 frequency values read as a value, though 356 of 393
+// technical limits do.
+//
+// Rendering '12 Electrical Oil BDV Yearly a) BDV of transformer oil' at 20px
+// under the word INTERVAL is the interface making a claim the data does not
+// support, which is the same failure the rest of the system is built to avoid.
+// So a value is promoted only if it reads as one, and otherwise appears as
+// ordinary quoted text — still visible, no longer asserted.
+function readsAsValue(v) {
+  const t = String(v || "").trim();
+  if (!t || t.length > 40) return false;
+  if (t.split(/\s+/).length > 6) return false;      // a sentence, not a value
+  if (/\(?[a-z]\)|\b\d+\)/.test(t)) return false;   // (a)  b)  12)  list markers
+  if (/\b(shall|should|must|will|during|when|if)\b/i.test(t)) return false;
+  if (/\s\d+$/.test(t)) return false;               // trailing table row number
+  return true;
+}
+
 function keyFacts(citations) {
-  const freq = [], lim = [];
+  const cards = [], quoted = [];
+  const seen = new Set();
+  const add = (label, value, source) => {
+    if (!value || seen.has(label + value)) return;
+    seen.add(label + value);
+    (readsAsValue(value) ? cards : quoted).push({k: label, v: value, s: source});
+  };
   for (const c of citations || []) {
-    if (c.frequency && !freq.some(f => f.v === c.frequency)) freq.push({v:c.frequency, s:c.label});
-    if (c.technical_limit_value && !lim.some(f => f.v === c.technical_limit_value)) lim.push({v:c.technical_limit_value, s:c.label});
+    add("Interval", c.frequency, c.label);
+    add("Limit / value", c.technical_limit_value, c.label);
   }
-  if (!freq.length && !lim.length) return "";
-  let h = `<div class="facts">`;
-  for (const f of freq) h += `<div class="fact"><div class="k">Interval</div><div class="v">${esc(f.v)}</div><div class="s">${esc(f.s)}</div></div>`;
-  for (const f of lim)  h += `<div class="fact"><div class="k">Limit / value</div><div class="v">${esc(f.v)}</div><div class="s">${esc(f.s)}</div></div>`;
-  return h + `</div>`;
+
+  let h = "";
+  if (cards.length) {
+    h += `<div class="facts">`;
+    for (const f of cards) {
+      h += `<div class="fact"><div class="k">${esc(f.k)}</div>
+            <div class="v">${esc(f.v)}</div><div class="s">${esc(f.s)}</div></div>`;
+    }
+    h += `</div>`;
+  }
+  if (quoted.length) {
+    h += `<div class="sect"><h3>Recorded in the source</h3><div class="rule"></div></div>`;
+    for (const f of quoted) {
+      h += `<div class="quoted"><span class="qk">${esc(f.k)}</span>
+            <span class="qv">${esc(f.v)}</span>
+            <span class="qs">${esc(f.s)}</span></div>`;
+    }
+    h += `<div class="subtle" style="margin-top:8px">Quoted verbatim from the knowledge base
+          record, which stores these as extracted text rather than as tidy values.</div>`;
+  }
+  return h;
 }
 
 // An abstention should be a useful dead end, not a blank one — without
