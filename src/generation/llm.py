@@ -26,7 +26,7 @@ DEFAULT_ENV_PATH = REPO_ROOT / ".env"
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_TEMPERATURE = 0.0
-DEFAULT_MAX_TOKENS = 1200
+DEFAULT_MAX_TOKENS = 4000
 
 
 class LLMUnavailableError(RuntimeError):
@@ -405,12 +405,12 @@ class OpenAIClient(LLMClient):
         # This is also strictly more predictable. The SDK's default client
         # picks up environment proxies and transport settings implicitly; ours
         # is visible in this file.
-        try:
-            import httpx
-
-            kwargs["http_client"] = httpx.Client(timeout=self.timeout)
-        except ImportError:  # pragma: no cover - httpx ships with openai
-            pass
+        # httpx2 first: that is what openai 3.x is built against. Falls back to
+        # httpx for older SDKs, and to the SDK's own client if neither is
+        # importable — never crashing merely because we could not supply one.
+        http = http_library(("httpx2", "httpx"))
+        if http is not None:
+            kwargs["http_client"] = http.Client(timeout=self.timeout)
 
         self._client = OpenAI(**kwargs)
         return self._client
@@ -539,12 +539,10 @@ class AnthropicClient(LLMClient):
             # Explicit HTTP client, for the same reason as OpenAIClient: the
             # SDK's default construction recurses on Python 3.14.
             kwargs = {"api_key": self._api_key, "timeout": self.timeout}
-            try:
-                import httpx
-
-                kwargs["http_client"] = httpx.Client(timeout=self.timeout)
-            except ImportError:  # pragma: no cover
-                pass
+            # httpx first here: the anthropic SDK is built against it.
+            http = http_library(("httpx", "httpx2"))
+            if http is not None:
+                kwargs["http_client"] = http.Client(timeout=self.timeout)
             self._client = anthropic.Anthropic(**kwargs)
 
         system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
@@ -611,27 +609,95 @@ PROVIDERS = {
 }
 
 
-def client_from_env(env_path: str | Path = DEFAULT_ENV_PATH) -> LLMClient:
+def http_library(prefer: Sequence[str] = ("httpx2", "httpx")):
+    """The HTTP library available, in order of preference. None if neither is.
+
+    openai 3.x depends on `httpx2`; openai 1.x and 2.x depended on `httpx`.
+    Neither is declared in our requirements — both arrive through the SDK — so
+    which one exists depends on which SDK version was installed, and a fresh
+    install today has httpx2 while an older environment has httpx.
+
+    Code that needs an HTTP client must therefore ask rather than assume.
+    Importing `httpx` unconditionally is what broke a new contributor's setup:
+    every check passed until the first line that said `import httpx`.
+
+    The preference order matters when passing a client into an SDK — give it
+    one built from the library it was itself compiled against, or the two
+    generations' APIs meet somewhere unpleasant.
+    """
+    for name in prefer:
+        try:
+            return __import__(name)
+        except ImportError:
+            continue
+    return None
+
+
+class UnavailableClient(LLMClient):
+    """A provider that could not be configured, represented rather than raised.
+
+    Exists for one caller: the HTTP service, which must be able to start
+    without an API key. Retrieval, the evidence viewer and the coverage
+    endpoints touch no model at all, and refusing to boot the whole service
+    because generation is unconfigured makes those unreachable too — which is
+    both unhelpful and contrary to what the README promises.
+
+    It is NOT a degraded provider and never silently substitutes anything:
+    `complete()` raises immediately with the original reason, so an evaluation
+    run that reached one would record LLM_ERROR and be marked invalid rather
+    than producing output. `is_real` stays True because it is not a test
+    double — the guard that keeps ScriptedClient out of reported results must
+    not be weakened to accommodate this.
+    """
+
+    provider = "unavailable"
+
+    def __init__(self, reason: str, provider_name: str = "unknown", model: str = "unconfigured"):
+        self._reason = reason
+        self.provider = provider_name
+        self.model = model
+
+    def availability_error(self) -> Optional[str]:
+        return self._reason
+
+    def complete(self, messages: Sequence[dict]) -> LLMResponse:
+        raise LLMUnavailableError(self._reason)
+
+
+def client_from_env(
+    env_path: str | Path = DEFAULT_ENV_PATH,
+    strict: bool = True,
+) -> LLMClient:
     """Build the configured client. `LLM_PROVIDER` selects; default openai.
 
     Loads .env first, so every caller — CLI, smoke test, evaluation runner —
     picks up the same configuration without each having to remember to do it.
 
-    Raises LLMUnavailableError rather than returning a degraded client, so a
-    misconfiguration fails at startup instead of halfway through a 44-question
-    evaluation run. The message names the one thing that is actually wrong.
+    With `strict=True` (the default) a misconfiguration raises, so it fails at
+    startup rather than halfway through a 44-question evaluation run. The
+    message names the one thing that is actually wrong.
+
+    With `strict=False` the same problem is returned as an `UnavailableClient`
+    carrying that message. Only the HTTP service uses this: it must start
+    without a key so that retrieval and the evidence endpoints stay usable,
+    and the failure then surfaces per-request as a 503 naming the cause.
+    Nothing is silently substituted — the client refuses to generate.
     """
     env_found = load_dotenv(env_path)
 
     name = (os.getenv("LLM_PROVIDER") or "openai").strip().lower()
     if name not in PROVIDERS:
-        raise LLMUnavailableError(
-            f"Unknown LLM_PROVIDER '{name}'. Known providers: {sorted(PROVIDERS)}"
-        )
+        message = f"Unknown LLM_PROVIDER '{name}'. Known providers: {sorted(PROVIDERS)}"
+        if strict:
+            raise LLMUnavailableError(message)
+        return UnavailableClient(message, provider_name=name)
 
     client = PROVIDERS[name]()
     reason = client.availability_error()
     if reason is not None:
         hint = "" if env_found else f"\n  (no .env file found at {Path(env_path)})"
-        raise LLMUnavailableError(f"provider '{name}' — {reason}{hint}")
+        message = f"provider '{name}' — {reason}{hint}"
+        if strict:
+            raise LLMUnavailableError(message)
+        return UnavailableClient(message, provider_name=name, model=getattr(client, "model", "unconfigured"))
     return client

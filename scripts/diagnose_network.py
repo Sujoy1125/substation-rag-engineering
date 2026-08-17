@@ -50,10 +50,34 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.generation.llm import load_dotenv
+from src.generation.llm import http_library, load_dotenv
 
-HOST = "api.openai.com"
+DEFAULT_HOST = "api.openai.com"
 PORT = 443
+
+# Filled in by step 1 from OPENAI_BASE_URL, so every later step tests the
+# server this installation actually talks to. Diagnosing api.openai.com while
+# the project is configured for Gemini, Azure or OpenRouter reports failures
+# about a host that is never contacted — which is worse than no diagnostic,
+# because it sends the reader somewhere real to look.
+HOST = DEFAULT_HOST
+
+# The FULL base URL, path included. Steps 7-8 must use this rather than
+# rebuilding "https://{HOST}/v1" — Gemini's OpenAI-compatible surface lives at
+# /v1beta/openai/, and /v1 on the same host is Google's native API, which
+# rejects a Bearer token. Dropping the path turns a working key into a 401.
+BASE_URL = f"https://{DEFAULT_HOST}/v1"
+
+
+def _host_from_base_url(base: str) -> str:
+    """Extract the hostname from a base URL, defaulting if it is unparseable."""
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(base)
+        return parsed.hostname or DEFAULT_HOST
+    except Exception:  # noqa: BLE001 - a bad URL is reported by step 1
+        return DEFAULT_HOST
 
 OK = "  OK   "
 BAD = "  FAIL "
@@ -102,9 +126,27 @@ def main() -> int:
         if not base.startswith(("http://", "https://")):
             print(f"{BAD}OPENAI_BASE_URL = {base!r} has no http:// or https:// scheme")
             return 1
-        print(f"{WARN}OPENAI_BASE_URL = {base!r}")
-        print("       Requests go there, NOT to api.openai.com. Remove it unless")
-        print("       you are deliberately using a proxy or local model.")
+        # A configured base URL is normal — the client speaks plain OpenAI
+        # protocol, so Azure, Gemini, Groq and OpenRouter all work through it.
+        # Recognised endpoints are reported as information; anything else gets
+        # a warning, since a typo here is otherwise invisible.
+        global HOST, BASE_URL
+        HOST = _host_from_base_url(base)
+        BASE_URL = base.rstrip("/")
+        KNOWN = {
+            "generativelanguage.googleapis.com": "Google Gemini",
+            "openrouter.ai": "OpenRouter",
+            "api.groq.com": "Groq",
+        }
+        provider = KNOWN.get(HOST) or ("Azure OpenAI" if HOST.endswith(".openai.azure.com") else None)
+        if provider:
+            print(f"{OK}OPENAI_BASE_URL points at {provider} ({HOST})")
+            print(f"       All checks below test {HOST}, not api.openai.com.")
+        else:
+            print(f"{WARN}OPENAI_BASE_URL = {base!r}")
+            print(f"       Unrecognised endpoint. Checks below will test {HOST}.")
+            print("       If that is a typo, requests will fail in ways that look")
+            print("       like a network fault. Remove the line to use OpenAI.")
 
     # --- key hygiene --------------------------------------------------
     # A key that survived copy-paste through a browser, a chat window and a
@@ -192,18 +234,47 @@ def main() -> int:
     except ssl.SSLCertVerificationError as e:
         print(f"{BAD}certificate verification failed: {e}")
         print()
-        print("       THIS IS THE COMMON CAMPUS-NETWORK FAILURE.")
-        print("       Your network is intercepting HTTPS with its own certificate")
-        print("       authority. Browsers accept it (the CA is in the Windows trust")
-        print("       store); Python does not (it uses certifi's bundle).")
-        print()
-        print("       Fixes, best first:")
-        print("         - use a phone hotspot or a network without interception")
-        print("         - export the network's root CA and point Python at it:")
-        print("             $env:SSL_CERT_FILE = 'C:\\path\\to\\corporate-ca.pem'")
-        print("             $env:REQUESTS_CA_BUNDLE = 'C:\\path\\to\\corporate-ca.pem'")
-        print("         - pip install pip-system-certs   (makes Python use the")
-        print("           Windows trust store, which already has the CA)")
+        # Two very different causes produce this identical message, and the
+        # advice for one is useless for the other. Split them by platform,
+        # because on macOS the overwhelmingly likely cause is a fresh
+        # python.org install whose root certificates were never installed —
+        # not network interception.
+        if sys.platform == "darwin":
+            import glob
+
+            print("       MOST LIKELY: this Python has no root certificates installed.")
+            print("       Python downloaded from python.org does not use the macOS")
+            print("       keychain. It ships its own certificate bundle and a script")
+            print("       to install it, which the .pkg installer does NOT run for you.")
+            print()
+            print("       Fix — run this once, then re-run this diagnostic:")
+            found = sorted(glob.glob("/Applications/Python*/Install Certificates.command"))
+            if found:
+                for path in found:
+                    print(f'           "{path}"')
+            else:
+                print('           "/Applications/Python 3.12/Install Certificates.command"')
+                print("           (adjust the version to match yours)")
+            print()
+            print("       Or, equivalently, from inside your virtual environment:")
+            print("           pip install --upgrade certifi")
+            print()
+            print("       LESS LIKELY: your network intercepts HTTPS with its own")
+            print("       certificate authority — common on campus wifi. If the fix")
+            print("       above does not help, try a phone hotspot to confirm.")
+        else:
+            print("       THIS IS THE COMMON CAMPUS-NETWORK FAILURE.")
+            print("       Your network is intercepting HTTPS with its own certificate")
+            print("       authority. Browsers accept it (the CA is in the Windows trust")
+            print("       store); Python does not (it uses certifi's bundle).")
+            print()
+            print("       Fixes, best first:")
+            print("         - use a phone hotspot or a network without interception")
+            print("         - export the network's root CA and point Python at it:")
+            print("             $env:SSL_CERT_FILE = 'C:\\path\\to\\corporate-ca.pem'")
+            print("             $env:REQUESTS_CA_BUNDLE = 'C:\\path\\to\\corporate-ca.pem'")
+            print("         - pip install pip-system-certs   (makes Python use the")
+            print("           Windows trust store, which already has the CA)")
         return 1
     except Exception as e:
         print(f"{BAD}TLS failed: {type(e).__name__}: {e}")
@@ -211,15 +282,23 @@ def main() -> int:
 
     # --- HTTP reachability (no auth) ----------------------------------
     step("HTTP request to the API (no key — 401 is the success case)")
+    httpx = http_library()
+    if httpx is None:
+        print(f"{BAD}neither httpx nor httpx2 is installed")
+        print("       Both arrive with the openai package; if neither is present the")
+        print("       install did not finish.  Fix:  pip install -r requirements.txt")
+        return 1
     try:
-        import httpx
 
-        r = httpx.get(f"https://{HOST}/v1/models", timeout=15)
-        if r.status_code == 401:
-            print(f"{OK}reached the API (401 Unauthorized, as expected without a key)")
-        elif r.status_code == 403:
-            print(f"{WARN}403 Forbidden — reached something, but access is blocked.")
-            print("       Often an egress proxy rather than OpenAI itself.")
+        r = httpx.get(f"{BASE_URL}/models", timeout=15)
+        if r.status_code in (401, 403):
+            # 403 is a valid "reached it, refused without credentials" from
+            # several compatible endpoints, not only a proxy block.
+            print(f"{OK}reached the endpoint ({r.status_code} without a key, as expected)")
+        elif r.status_code == 404:
+            print(f"{WARN}404 — this endpoint does not expose /models")
+            print("       Not a fault: several OpenAI-compatible providers implement")
+            print("       only the chat endpoint. Step 10 is the check that matters.")
         else:
             print(f"{WARN}unexpected status {r.status_code}")
     except Exception as e:
@@ -233,25 +312,42 @@ def main() -> int:
     # get through, so a failure here is about the request, not the route.
     step("Authenticated request via raw httpx (bypasses the OpenAI SDK)")
     raw_ok = False
+    httpx = http_library()
+    if httpx is None:
+        print(f"{BAD}neither httpx nor httpx2 is installed")
+        print("       Both arrive with the openai package; if neither is present the")
+        print("       install did not finish.  Fix:  pip install -r requirements.txt")
+        return 1
     try:
-        import httpx
 
         r = httpx.get(
-            f"https://{HOST}/v1/models",
+            f"{BASE_URL}/models",
             headers={"Authorization": f"Bearer {key}"},
             timeout=20,
         )
+        where = "your provider" if HOST != DEFAULT_HOST else "OpenAI"
         if r.status_code == 200:
             print(f"{OK}200 — the key works and the network allows it")
             raw_ok = True
+        elif r.status_code == 404:
+            # Not every compatible endpoint implements /models. Never abort on
+            # this: step 10 makes a real generation, which is the actual test.
+            print(f"{WARN}404 — this endpoint does not implement /models")
+            print("       Nothing is proven either way. Continuing to step 10,")
+            print("       which makes a real generation and settles it.")
         elif r.status_code == 401:
-            print(f"{BAD}401 Unauthorized — the key is rejected by OpenAI")
-            print("       Revoked, mistyped, or from a different account.")
-            print("       Generate a new one: https://platform.openai.com/api-keys")
-            return 1
+            print(f"{WARN}401 Unauthorized — {where} rejected this key here")
+            print("       Revoked, mistyped, or issued for a different service.")
+            if HOST != DEFAULT_HOST:
+                print("       NOTE: some compatible endpoints authenticate the model")
+                print("       listing differently from generation. Continuing to")
+                print("       step 10 rather than concluding from this alone.")
+            else:
+                print("       Generate a new one: https://platform.openai.com/api-keys")
+                return 1
         elif r.status_code == 429:
             print(f"{BAD}429 — the key is valid but out of quota/credit")
-            print("       https://platform.openai.com/settings/organization/billing")
+            print("       Add credit with your provider, then re-run.")
             return 1
         else:
             print(f"{WARN}status {r.status_code}: {r.text[:200]}")

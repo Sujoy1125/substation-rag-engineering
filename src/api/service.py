@@ -597,7 +597,17 @@ def create_app(service: RAGService):
 
 
 def build_default_app():
-    """Entry point for `uvicorn src.api.service:build_default_app --factory`."""
+    """Entry point for `uvicorn src.api.service:build_default_app --factory`.
+
+    `strict=False` on purpose: the service must start without an API key.
+    Retrieval, /evidence and /facets touch no model, and refusing to boot
+    because generation is unconfigured would make those unreachable too — so a
+    contributor with no key could not see the system work at all.
+
+    Nothing is degraded silently. /health reports the provider as not ready
+    and returns 503, and /ask raises the original configuration error, which
+    the endpoint turns into a 503 naming the cause.
+    """
     from src.generation.llm import client_from_env
 
-    return create_app(RAGService.from_env(client_from_env()))
+    return create_app(RAGService.from_env(client_from_env(strict=False)))

@@ -265,6 +265,47 @@ def test_evidence_returns_the_full_record_including_sentinels():
     assert body["notes"] == "NOT VERIFIED"
 
 
+def test_service_starts_with_no_api_key_configured(monkeypatch, tmp_path):
+    """The README promises retrieval, /evidence and /facets work without a key.
+    Booting the whole service on a missing key would make that false, and a new
+    contributor could not see the system work at all."""
+    from src.generation.llm import UnavailableClient, client_from_env
+
+    for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
+
+    client = client_from_env(env_path=tmp_path / "absent.env", strict=False)
+    assert isinstance(client, UnavailableClient)
+    assert "OPENAI_API_KEY" in (client.availability_error() or "")
+
+    pipeline = RAGPipeline(CHUNKS, llm=client, top_k=3).index()
+    c = client_for(RAGService(pipeline))
+
+    # The endpoints that never touch a model must work.
+    assert c.get("/", follow_redirects=True).status_code == 200
+    assert c.get("/facets").status_code == 200
+    assert c.get("/evidence/D02-C0007").status_code == 200
+    # Readiness is honest about it.
+    health = c.get("/health")
+    assert health.status_code == 503
+    assert health.json()["llm"]["ready"] is False
+    # And asking fails with the cause named, not a crash.
+    ask = c.post("/ask", json={"question": "oil BDV frequency"})
+    assert ask.status_code == 503
+    assert "OPENAI_API_KEY" in ask.json()["detail"]
+
+
+def test_strict_client_still_raises_so_evaluation_runs_fail_early(tmp_path, monkeypatch):
+    """Only the HTTP service tolerates a missing key. An evaluation run must
+    still fail at startup rather than halfway through 44 questions."""
+    from src.generation.llm import LLMUnavailableError, client_from_env
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    with pytest.raises(LLMUnavailableError):
+        client_from_env(env_path=tmp_path / "absent.env")
+
+
 def test_evidence_schema_covers_every_kb_field():
     """FastAPI filters a response to its declared model, so a field missing from
     the schema disappears silently from the endpoint people use to audit

@@ -18,5 +18,13 @@ experiments/*.json
 
 src/embeddings/*.backup
 
-# Scratch: stale git lock files moved here (the device bridge cannot delete)
-_to_delete/
+# macOS — Finder drops these into every folder it opens
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editors
+.vscode/
+.idea/
+*.swp

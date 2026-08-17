@@ -1,0 +1,38 @@
+# Normalise line endings across Windows, macOS and Linux.
+#
+# Windows ends a line with CRLF, macOS and Linux with LF. Without this file,
+# a Mac user saving a file a Windows user wrote can make Git report that every
+# line changed — turning a three-line fix into a whole-file diff that nobody
+# can review. This has nothing to do with the code being wrong; it is purely
+# how the bytes are stored.
+#
+# `text=auto` tells Git: store LF in the repository, and convert to whatever
+# the checking-out machine prefers. Everyone edits normally; the repository
+# stays consistent.
+* text=auto
+
+# Explicit, so intent survives even if the auto-detection is ever wrong.
+*.py    text diff=python
+*.md    text
+*.txt   text
+*.json  text
+*.html  text
+*.css   text
+*.js    text
+*.yml   text
+*.yaml  text
+*.cfg   text
+*.ini   text
+*.sh    text eol=lf
+
+# Binary — never convert these, it would corrupt them.
+*.xlsx  binary
+*.xls   binary
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.docx  binary
+*.pptx  binary
