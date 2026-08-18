@@ -1,0 +1,113 @@
+<!-- Enclosure overlay: a meter-box door that opens by itself.
+
+     This is a decoration layer injected over the STANDARD interface at /box.
+     It adds nothing and removes nothing — the page underneath is byte-for-byte
+     the file served at /, so the two can never drift apart.
+
+     The door is built by JavaScript, deliberately. If the script fails, no
+     overlay is ever created and the plain interface is simply there. A door
+     drawn in HTML would stay shut when its opener broke, turning decoration
+     into a total failure — which is exactly the risk of putting a gate in
+     front of a demo.
+
+     It opens on its own after a beat. Clicking opens it immediately. Reduced
+     motion, or ?box=0, skips it entirely. Nothing is ever gated behind a
+     click that might not happen. -->
+<style>
+  .encl { position:fixed; inset:0; z-index:9999; perspective:1600px;
+          background:#0b0e11; transition:background .5s ease .12s; }
+  /* The backdrop clears as the doors swing, or the leaves would open onto a
+     black rectangle instead of onto the interface. */
+  .encl.open { background:transparent; }
+  .encl.gone { display:none; }
+  .encl-leaf {
+    position:absolute; top:0; bottom:0; width:50.2%;
+    background:
+      repeating-linear-gradient(90deg, rgba(255,255,255,.020) 0 2px, rgba(0,0,0,.020) 2px 4px),
+      linear-gradient(158deg, #3a434c 0%, #262d34 38%, #1b2126 100%);
+    border:1px solid #11161a;
+    transition: transform .78s cubic-bezier(.6,.02,.2,1), opacity .78s ease;
+    will-change: transform;
+  }
+  .encl-leaf.l { left:0;  transform-origin:left  center; box-shadow: inset -22px 0 46px rgba(0,0,0,.55); }
+  .encl-leaf.r { right:0; transform-origin:right center; box-shadow: inset  22px 0 46px rgba(0,0,0,.55); }
+  .encl.open .encl-leaf.l { transform: rotateY(-108deg); opacity:.15; }
+  .encl.open .encl-leaf.r { transform: rotateY( 108deg); opacity:.15; }
+
+  /* hinges */
+  .encl-hinge { position:absolute; width:16px; height:60px; border-radius:3px;
+                background:linear-gradient(180deg,#4c555e,#2b3238);
+                box-shadow:0 1px 2px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.14); }
+  .encl-leaf.l .encl-hinge { left:6px; }
+  .encl-leaf.r .encl-hinge { right:6px; }
+  .encl-hinge.a { top:18%; } .encl-hinge.b { bottom:18%; }
+
+  /* handle, on the meeting edge of each leaf */
+  .encl-handle { position:absolute; top:50%; margin-top:-34px; width:11px; height:68px;
+                 border-radius:6px; background:linear-gradient(180deg,#59636d,#333a41);
+                 box-shadow:0 2px 5px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.18); }
+  .encl-leaf.l .encl-handle { right:14px; }
+  .encl-leaf.r .encl-handle { left:14px; }
+
+  /* engraved nameplate, spanning the closed doors */
+  .encl-plate { position:absolute; left:50%; top:34%; transform:translate(-50%,-50%);
+                text-align:center; pointer-events:none;
+                transition:opacity .3s ease; }
+  .encl.open .encl-plate { opacity:0; }
+  .encl-plate b { display:block; font:600 22px/1.25 ui-sans-serif,system-ui,sans-serif;
+                  letter-spacing:3.5px; text-transform:uppercase; color:#98a3ad;
+                  text-shadow:0 1px 0 rgba(255,255,255,.10), 0 -1px 0 rgba(0,0,0,.75); }
+  .encl-plate span { display:block; margin-top:10px;
+                     font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+                     letter-spacing:2.2px; text-transform:uppercase; color:#69737d;
+                     text-shadow:0 1px 0 rgba(255,255,255,.06); }
+  .encl-plate em { display:block; margin-top:22px; font-style:normal;
+                   font:10.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+                   letter-spacing:2px; text-transform:uppercase; color:#4d5760; }
+
+  @media (max-width:700px) {
+    .encl-plate b { font-size:15px; letter-spacing:2px; }
+    .encl-plate span { font-size:9.5px; letter-spacing:1.4px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .encl { display:none; } }
+</style>
+<script>
+(function () {
+  try {
+    var p = new URLSearchParams(location.search);
+    if (p.get("box") === "0") return;
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    var el = document.createElement("div");
+    el.className = "encl";
+    el.setAttribute("aria-hidden", "true");   // the real UI beneath is the page
+    el.innerHTML =
+      '<div class="encl-leaf l"><i class="encl-hinge a"></i><i class="encl-hinge b"></i>' +
+        '<i class="encl-handle"></i></div>' +
+      '<div class="encl-leaf r"><i class="encl-hinge a"></i><i class="encl-hinge b"></i>' +
+        '<i class="encl-handle"></i></div>' +
+      '<div class="encl-plate"><b>Substation O&amp;M</b>' +
+        '<span>Evidence-grounded assistant &middot; CEA / BHEL document set</span>' +
+        '<em>opening</em></div>';
+    document.body.appendChild(el);
+
+    var done = false;
+    function open() {
+      if (done) return;
+      done = true;
+      el.classList.add("open");
+      // Removed from the document, not just hidden: a transparent overlay
+      // left lying over the page would swallow the first click on Ask.
+      setTimeout(function () { el.classList.add("gone"); el.remove(); }, 820);
+    }
+    el.addEventListener("click", open);
+    document.addEventListener("keydown", open, { once: true });
+    setTimeout(open, 900);
+    // Belt and braces: if anything above misfires, the door is gone in 3s.
+    setTimeout(function () { if (!done) { el.remove(); done = true; } }, 3000);
+  } catch (e) {
+    var stuck = document.querySelector(".encl");
+    if (stuck) stuck.remove();
+  }
+})();
+</script>

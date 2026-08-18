@@ -43,6 +43,25 @@ from src.generation.pipeline import DEFAULT_KB_PATH, DEFAULT_TOP_K, PipelineResu
 
 MAX_QUESTION_CHARS = 1000
 UI_PATH = Path(__file__).resolve().parent / "static" / "index.html"
+PANEL_PATH = Path(__file__).resolve().parent / "static" / "panel.html"
+ENCLOSURE_PATH = Path(__file__).resolve().parent / "static" / "enclosure.html"
+
+
+def wrap_in_enclosure(page: str, enclosure: str) -> str:
+    """Inject the meter-box door over an existing page.
+
+    The page is passed through unchanged and the enclosure appended before
+    </body>, so /box serves the standard interface plus a decoration rather
+    than a second copy of it. Copying index.html to add a frame would create
+    two interfaces that drift, and the one being demonstrated would be the one
+    nobody was testing.
+
+    If either marker is missing the enclosure is appended at the end, which
+    still works — script tags execute wherever they land.
+    """
+    if "</body>" in page:
+        return page.replace("</body>", enclosure + "\n</body>", 1)
+    return page + enclosure
 
 
 class AskRequest(BaseModel):
@@ -89,6 +108,31 @@ class SafetyNoteOut(BaseModel):
     label: str
     chunk_id: str
     text: str
+
+
+class ClaimOut(BaseModel):
+    """One factual statement, with the evidence that supports it.
+
+    The model returns prose and a separate list of claims, each carrying its
+    evidence labels. Only the prose used to reach the interface, so the link
+    between a specific statement and its source existed on the server and was
+    invisible on screen — with three sentences and three sources a reader could
+    not tell which came from which, and "every statement traces to a source" is
+    the claim this project rests on.
+
+    `unsupported` is not filtered out. A claim the model made without valid
+    evidence is exactly what a reader needs to see; hiding it would present a
+    partly-grounded answer as a fully-grounded one.
+    """
+
+    text: str
+    labels: List[str] = Field(description="Evidence labels supporting this claim, e.g. [\"E4\"]")
+    chunk_ids: List[str] = Field(description="Resolvable at GET /evidence/{chunk_id}")
+    invalid_labels: List[str] = Field(
+        default_factory=list,
+        description="Labels the model cited that were never supplied — counted, not silently dropped",
+    )
+    supported: bool
 
 
 class EvidenceOut(BaseModel):
@@ -165,6 +209,14 @@ class AskResponse(BaseModel):
     answer: str = Field(description="Empty unless status is ANSWER")
     display_text: str = Field(description="Rendered answer with its reference list")
     citations: List[CitationOut]
+    claims: List[ClaimOut] = Field(
+        default_factory=list,
+        description=(
+            "Each factual statement in the answer with the evidence supporting it. "
+            "This is what makes the grounding claim checkable statement by statement "
+            "rather than only for the answer as a whole."
+        ),
+    )
     evidence_considered: List[EvidenceOut] = Field(
         description="Everything retrieved, cited or not — the recall side of the audit"
     )
@@ -283,7 +335,14 @@ class RAGService:
             loaded, _report = load_chunks(str(cfg.kb_path))
         pipeline = RAGPipeline(loaded, llm=llm, top_k=cfg.top_k).index()
 
-        gate, warning = None, ""
+        # Two audiences, two messages. The USER needs one fact: these answers
+        # were not confidence-gated. The DEVELOPER needs the file path and the
+        # command to fit a model. Sending both to the browser put an absolute
+        # home-directory path and a --from <eval json> invocation on screen in
+        # front of a technician, which reads as unfinished software and tells
+        # them nothing they can act on. The fact goes to the interface; the
+        # instructions go to the console the developer is already watching.
+        gate, warning, detail = None, "", ""
         try:
             model = (
                 ConfidenceModel.load(cfg.confidence_model_path)
@@ -293,15 +352,23 @@ class RAGService:
             if model.is_calibrated:
                 gate = ConfidenceGate(model)
             else:
-                warning = (
-                    "a confidence model file exists but has no fitted weights; "
-                    "answers are UNGATED"
+                warning = "These answers were not confidence-gated."
+                detail = (
+                    "A confidence model file exists but has no fitted weights, so the "
+                    "gate is inactive.\n  Fit one on the calibration split:\n"
+                    "      python experiments/calibrate_confidence.py --from <eval json> "
+                    "--max-unsafe-rate <policy>"
                 )
         except (FileNotFoundError, ValueError, OSError) as e:
-            warning = (
-                f"no calibrated confidence model, so answers are UNGATED. "
-                f"Fit one with experiments/calibrate_confidence.py. ({e})"
+            warning = "These answers were not confidence-gated."
+            detail = (
+                f"No calibrated confidence model, so the gate is inactive.\n  {e}\n"
+                "  Fit one on the calibration split:\n"
+                "      python experiments/calibrate_confidence.py --from <eval json> "
+                "--max-unsafe-rate <policy>"
             )
+        if detail:
+            print(f"[confidence gate] {detail}", flush=True)
         return cls(pipeline, gate=gate, gate_warning=warning)
 
     # -- behaviour ---------------------------------------------------------
@@ -340,6 +407,16 @@ class RAGService:
             "answer": a.answer_text,
             "display_text": result.rendered(),
             "citations": [self._citation_payload(c) for c in a.citations],
+            "claims": [
+                {
+                    "text": cl.text,
+                    "labels": [c.label for c in cl.citations],
+                    "chunk_ids": [c.chunk_id for c in cl.citations],
+                    "invalid_labels": list(cl.invalid_labels),
+                    "supported": cl.is_supported,
+                }
+                for cl in a.claims
+            ],
             "evidence_considered": [
                 {
                     "chunk_id": r.chunk.chunk_id,
@@ -546,6 +623,38 @@ def create_app(service: RAGService):
         if UI_PATH.exists():
             return HTMLResponse(UI_PATH.read_text(encoding="utf-8"))
         return RedirectResponse(url="/docs")
+
+    @app.get("/panel", include_in_schema=False)
+    def panel():
+        """Serve the control-panel skin of the same UI.
+
+        This is a second face on one service, not a second service: it calls
+        the same /ask and /evidence endpoints and shows the same facts. It
+        exists so the presentation can be judged against the plain UI side by
+        side rather than replaced blind. If the file is absent, fall back to
+        the plain UI rather than 404 — a missing skin is not an outage.
+        """
+        if PANEL_PATH.exists():
+            return HTMLResponse(PANEL_PATH.read_text(encoding="utf-8"))
+        return RedirectResponse(url="/")
+
+    @app.get("/box", include_in_schema=False)
+    def box(ui: str = "panel"):
+        """The standard interface behind a meter-box door that opens itself.
+
+        Same page as /, plus an overlay. If either file is missing, or the
+        enclosure cannot be read, fall back to the plain interface — the
+        decoration is never allowed to take the interface down with it.
+        """
+        source = PANEL_PATH if (ui != "plain" and PANEL_PATH.exists()) else UI_PATH
+        if not source.exists():
+            return RedirectResponse(url="/docs")
+        page = source.read_text(encoding="utf-8")
+        if not ENCLOSURE_PATH.exists():
+            return HTMLResponse(page)
+        return HTMLResponse(
+            wrap_in_enclosure(page, ENCLOSURE_PATH.read_text(encoding="utf-8"))
+        )
 
     @app.get(
         "/health",

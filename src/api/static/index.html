@@ -194,6 +194,20 @@
   .fact .s { font-size:11px; color:var(--ink-3); margin-top:2px; font-family:var(--mono); }
   /* The demoted form: readable, attributed, and making no claim to be a
      tidy value. Deliberately not styled like a card. */
+  /* Statement-by-statement attribution. A dotted leader carries the eye from
+     the claim to its evidence, the way a table of contents does — the pairing
+     is the whole point, so it has to survive a long claim wrapping. */
+  .claim { display:flex; gap:var(--s3); align-items:baseline; padding:8px 0;
+           border-bottom:1px solid var(--line-soft); font-size:14.5px; }
+  .claim:last-of-type { border-bottom:none; }
+  .claim-t { flex:1; min-width:0; }
+  .claim-e { flex:none; white-space:nowrap; }
+  .claim-bad .claim-t { color:var(--ink-2); }
+  .unsupported { font-size:11px; font-weight:650; letter-spacing:.3px; padding:2px 8px;
+                 border-radius:var(--r1); color:var(--bad);
+                 border:1px solid var(--bad-line); background:var(--bad-soft); }
+  @media (max-width:660px) { .claim { flex-wrap:wrap; gap:6px; } }
+
   .quoted { display:flex; gap:var(--s3); align-items:baseline; padding:7px 0;
             border-bottom:1px solid var(--line-soft); font-size:14px; }
   .quoted:last-of-type { border-bottom:none; }
@@ -406,7 +420,8 @@
 <footer>
   Generated only from retrieved chunks of the frozen knowledge base (KB_v1.1, <span id="kbn">&mdash;</span> chunks;
   Central Electricity Authority / Ministry of Power and BHEL). Intervals, limits and safety text are read from
-  the knowledge base record, not from generated text. API reference at <a href="/docs">/docs</a>.
+  the knowledge base record, not from generated text. Control-panel view at <a href="/panel">/panel</a>
+  &middot; API reference at <a href="/docs">/docs</a>.
 </footer>
 
 <dialog id="dlg">
@@ -575,7 +590,8 @@ function render(b) {
 
   // 2. The answer.
   if (b.status === "ANSWER") {
-    h += `<div class="answer-text">${linkLabels(b.answer, b.citations)}</div>` + keyFacts(b.citations);
+    h += `<div class="answer-text">${linkLabels(b.answer, b.citations)}</div>`
+       + grounding(b.claims) + keyFacts(b.citations);
   } else if (b.status === "INSUFFICIENT_EVIDENCE") {
     h += `<div class="note"><b>No answer is given.</b> The retrieved evidence does not support one` +
          (b.missing_information ? `: ${esc(b.missing_information)}` : ".") + `</div>` + coverageHint();
@@ -615,6 +631,40 @@ function render(b) {
     </div>` + engineering(b, cited) + `</div></div>`;
   $("out").innerHTML = h;
   applyEngVisibility();
+}
+
+// Statement-by-statement attribution.
+//
+// The model returns clean prose AND a separate list of claims, each carrying
+// the evidence labels supporting it. Until now only the prose was displayed,
+// so with three sentences and three sources a reader could not tell which came
+// from which — the link existed on the server and was invisible on screen.
+// "Every statement traces to a source" is the project's central claim, and an
+// interface that cannot show it is not demonstrating it.
+//
+// Placed below the answer rather than inside it: the prompt deliberately asks
+// for prose with no inline markers, and threading labels through sentences
+// would clutter text written to be read aloud on site.
+function grounding(claims) {
+  if (!claims || !claims.length) return "";
+  let h = `<div class="sect"><h3>Grounded in</h3><div class="rule"></div></div>`;
+  for (const c of claims) {
+    const chips = (c.labels || []).map((l, i) =>
+      `<span class="ev-label" onclick="showEvidence('${esc((c.chunk_ids || [])[i] || "")}')">${esc(l)}</span>`
+    ).join("");
+    // An unsupported claim is shown, not hidden. The model asserting something
+    // it could not cite is precisely what a reader needs to see — filtering it
+    // would present a partly-grounded answer as a fully-grounded one.
+    const flag = c.supported ? chips
+      : `<span class="unsupported" title="the model asserted this without citing valid evidence">not cited</span>`;
+    const bad = (c.invalid_labels || []).length
+      ? `<span class="unsupported" style="margin-left:6px">invented ${esc(c.invalid_labels.join(", "))}</span>` : "";
+    h += `<div class="claim ${c.supported ? "" : "claim-bad"}">
+            <span class="claim-t">${esc(c.text)}</span>
+            <span class="claim-e">${flag}${bad}</span>
+          </div>`;
+  }
+  return h;
 }
 
 // Operational payload, straight from the KB fields of the cited chunks.

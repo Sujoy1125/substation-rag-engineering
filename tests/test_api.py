@@ -25,6 +25,7 @@ from src.generation.pipeline import RAGPipeline  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_HTML = (REPO_ROOT / "src" / "api" / "static" / "index.html").read_text(encoding="utf-8")
+PANEL_HTML = (REPO_ROOT / "src" / "api" / "static" / "panel.html").read_text(encoding="utf-8")
 
 
 def make_chunk(**overrides) -> Chunk:
@@ -507,3 +508,297 @@ def test_demoted_values_are_still_shown_not_hidden():
     assert "Recorded in the source" in UI_HTML
     assert "Quoted verbatim from the knowledge base" in UI_HTML
     assert "quoted" in UI_HTML
+
+
+def test_ungated_warning_is_for_a_user_not_a_developer(tmp_path, capsys):
+    """The user needs one fact: these answers were not confidence-gated. Paths
+    and commands belong in the console the developer is watching — an absolute
+    home-directory path on screen reads as unfinished software to a reviewer,
+    and tells a technician nothing they can act on."""
+    service = RAGService.from_env(
+        ScriptedClient([GOOD_REPLY]),
+        chunks=CHUNKS,
+        config=__import__("src.api.service", fromlist=["ServiceConfig"]).ServiceConfig(
+            confidence_model_path=tmp_path / "absent.json"
+        ),
+    )
+    body = client_for(service).post("/ask", json={"question": "oil BDV"}).json()
+
+    warning = body["warning"]
+    assert "not confidence-gated" in warning
+    for leak in ("/Users/", "python experiments", "--from", ".json", "\\"):
+        assert leak not in warning, f"user-facing warning leaks {leak!r}"
+    assert len(warning) < 120, "a user-facing warning should be one sentence"
+
+    # The detail must still exist — for the developer, on the console.
+    printed = capsys.readouterr().out
+    assert "calibrate_confidence.py" in printed
+
+
+# --------------------------------------------------------------------------
+# statement-by-statement attribution
+# --------------------------------------------------------------------------
+
+
+def test_claims_carry_their_evidence_through_the_api():
+    """The link between a statement and its source existed on the server and
+    never reached the interface. With three sentences and three sources a
+    reader could not tell which came from which."""
+    c = client_for(build_service([GOOD_REPLY]))
+    body = c.post("/ask", json={"question": "oil BDV frequency"}).json()
+
+    assert body["claims"], "an ANSWER must expose its claims"
+    claim = body["claims"][0]
+    assert claim["text"]
+    assert claim["labels"] == ["E1"]
+    assert claim["supported"] is True
+    # Every chunk_id must resolve, or the attribution is decorative.
+    for cid in claim["chunk_ids"]:
+        assert c.get(f"/evidence/{cid}").status_code == 200
+
+
+def test_an_uncited_claim_is_shown_not_filtered_out():
+    """A claim the model asserted without valid evidence is exactly what a
+    reader needs to see. Hiding it would present a partly-grounded answer as a
+    fully-grounded one."""
+    reply = json.dumps({
+        "status": "ANSWER",
+        "answer": "Oil is tested yearly and bushings every two years [E1].",
+        "claims": [
+            {"text": "oil tested yearly", "evidence_labels": ["E1"]},
+            {"text": "bushings every two years", "evidence_labels": ["E9"]},
+        ],
+    })
+    body = client_for(build_service([reply])).post(
+        "/ask", json={"question": "intervals"}
+    ).json()
+
+    by_text = {c["text"]: c for c in body["claims"]}
+    assert by_text["oil tested yearly"]["supported"] is True
+    bad = by_text["bushings every two years"]
+    assert bad["supported"] is False, "an uncited claim must still appear"
+    assert bad["labels"] == []
+    assert "E9" in bad["invalid_labels"], "an invented label is counted, not dropped"
+
+
+def test_ui_renders_attribution_and_flags_uncited_claims():
+    for marker in ["function grounding(", "Grounded in", "claim-bad", "not cited", "invented "]:
+        assert marker in UI_HTML, f"UI missing {marker!r}"
+    # It must read claims from the payload, never re-parse the prose.
+    assert "b.claims" in UI_HTML
+
+
+# --------------------------------------------------------------------------
+# the control-panel skin
+#
+# /panel is a second face on one service, not a second service. The risk a
+# decorative skin carries is that the decoration quietly drops something the
+# plain view was careful about — the gate state, the wording that separates a
+# recorded safety line from advice, the difference between "we declined" and
+# "we broke". These tests hold both surfaces to the same properties, so the
+# skin cannot be chosen and later found to have cost honesty.
+# --------------------------------------------------------------------------
+
+
+SURFACES = [("index.html", UI_HTML), ("panel.html", PANEL_HTML)]
+
+
+def test_panel_is_served():
+    c = client_for(build_service([GOOD_REPLY]))
+
+    r = c.get("/panel", follow_redirects=True)
+    assert r.status_code == 200
+    assert "<!DOCTYPE html>" in r.text
+
+
+def test_panel_falls_back_to_the_plain_ui_when_absent(monkeypatch):
+    """A missing skin is a cosmetic loss, not an outage — and mid-demo the
+    right behaviour is to show the working interface, not an error."""
+    from src.api import service as service_module
+
+    monkeypatch.setattr(service_module, "PANEL_PATH", Path("/nonexistent/panel.html"))
+    c = client_for(build_service([GOOD_REPLY]))
+
+    r = c.get("/panel", follow_redirects=False)
+    assert r.status_code in (301, 302, 307)
+    assert r.headers["location"] == "/"
+
+
+def test_both_surfaces_reach_only_this_service():
+    """Demo wifi is not worth betting a presentation on, and a skin is where
+    a webfont or an icon CDN usually sneaks in."""
+    for name, html in SURFACES:
+        for pattern in ("http://", "https://", "//cdn", 'src="//'):
+            assert pattern not in html, f"{name} reaches outside itself: {pattern!r}"
+
+
+def test_both_surfaces_call_endpoints_the_service_exposes():
+    c = client_for(build_service([GOOD_REPLY]))
+    spec = c.get("/openapi.json").json()["paths"]
+
+    for name, html in SURFACES:
+        for path in ('"/ask"', '"/health"', '"/facets"', "/evidence/"):
+            assert path in html, f"{name} calls {path}"
+    for path in ("/ask", "/health", "/facets", "/evidence/{chunk_id}"):
+        assert path in spec, f"a surface calls {path} but the API does not serve it"
+
+
+def test_both_surfaces_render_every_answer_status():
+    from src.generation.answer import AnswerStatus
+
+    for name, html in SURFACES:
+        for status in AnswerStatus:
+            if status is AnswerStatus.LLM_ERROR:
+                continue  # surfaced as HTTP 503, never as an answer body
+            assert status.value in html, f"{name} has no rendering for {status.value}"
+
+
+def test_both_surfaces_show_whether_the_answer_was_gated():
+    """An ungated answer that looks identical to a gated one is the single
+    most misleading thing this interface could do."""
+    for name, html in SURFACES:
+        assert "b.gated" in html, f"{name} does not read the gate state"
+        assert "ungated" in html, f"{name} never says an answer was ungated"
+        assert "b.warning" in html, f"{name} drops the ungated warning"
+
+
+def test_both_surfaces_label_safety_text_as_recorded_not_as_advice():
+    """The KB's safety line is a quotation from a document, not an instruction
+    this system is issuing. A panel that renders it as a warning lamp would be
+    making a claim no one has authorised."""
+    for name, html in SURFACES:
+        assert "recorded in the cited source" in html.lower(), f"{name} presents safety text as its own"
+        assert "Quoted verbatim from the knowledge base" in html, f"{name} drops the provenance caveat"
+        assert "permit-to-work" in html, f"{name} drops the deferral to site procedure"
+
+
+def test_both_surfaces_separate_a_service_fault_from_an_abstention():
+    """"We could not reach the model" and "the knowledge base does not support
+    an answer" are opposite facts. Conflated, a broken key reads as a gap in
+    the documents."""
+    for name, html in SURFACES:
+        assert "renderFailure" in html, f"{name} has no distinct failure path"
+        assert "not a finding about the knowledge base" in html, f"{name} may read a fault as a gap"
+
+
+def test_both_surfaces_take_domain_values_from_metadata_not_from_prose():
+    """Intervals and limits come from the citation payload — KB metadata —
+    never from parsing what the model wrote. The one regex over the answer
+    body finds evidence labels, which are validated upstream."""
+    for name, html in SURFACES:
+        assert "c.frequency" in html and "c.technical_limit_value" in html, f"{name}"
+        assert "safety_notes" in html, f"{name}"
+        assert html.count(".replace(/\\[(E\\d+)\\]/g") == 1, f"{name} parses the prose more than once"
+
+
+def test_both_surfaces_apply_the_same_promotion_rule():
+    """A card headed INTERVAL asserts "this IS the interval". The rule that
+    decides what earns one must not drift between the two skins."""
+    import re
+
+    rules = []
+    for name, html in SURFACES:
+        m = re.search(r"function readsAsValue\(v\) \{(.*?)\n\}", html, re.S)
+        assert m, f"{name} has no readsAsValue"
+        rules.append(re.sub(r"\s+", " ", m.group(1)).strip())
+    assert rules[0] == rules[1], "the two surfaces would promote different values"
+
+
+def test_both_surfaces_keep_demoted_values_visible():
+    for name, html in SURFACES:
+        assert "Recorded in the source" in html, f"{name} hides messy values instead of quoting them"
+
+
+def test_both_surfaces_show_attribution_and_flag_uncited_claims():
+    for name, html in SURFACES:
+        for marker in ["function grounding(", "Grounded in", "not cited", "invented ", "b.claims"]:
+            assert marker in html, f"{name} missing {marker!r}"
+
+
+def test_both_surfaces_link_inline_evidence_labels_to_their_source():
+    """[E4] in the answer text is the reader's shortest path to the document.
+    Left as plain text it is noise; linked, it is the check."""
+    for name, html in SURFACES:
+        assert "function linkLabels(" in html, f"{name} does not link inline labels"
+        assert "linkLabels(b.answer" in html, f"{name} defines linkLabels but never uses it"
+
+
+def test_no_surface_uses_browser_storage():
+    """Nothing here is worth persisting, and a stale cached answer shown
+    beside a fresh question is a correctness bug wearing a UI costume."""
+    for name, html in SURFACES:
+        for api in ("localStorage", "sessionStorage", "indexedDB"):
+            assert api not in html, f"{name} uses {api}"
+
+
+# --------------------------------------------------------------------------
+# /box — the standard interface behind a door
+#
+# The risk of a decorative enclosure is not that it looks bad. It is that it
+# becomes a second copy of the interface that quietly diverges from the one
+# under test, or that it fails shut and takes the demo with it. These tests
+# hold it to being an overlay on the real page and nothing else.
+# --------------------------------------------------------------------------
+
+
+def test_box_serves_the_standard_ui_plus_the_enclosure():
+    c = client_for(build_service([GOOD_REPLY]))
+
+    plain = c.get("/", follow_redirects=True).text
+    boxed = c.get("/box", follow_redirects=True).text
+
+    assert "encl" in boxed, "the enclosure was not injected"
+    # Everything the plain page has, the boxed page still has.
+    body = plain.split("<body>", 1)[1].rsplit("</body>", 1)[0]
+    assert body in boxed, "/box is not the same interface underneath"
+    assert len(boxed) > len(plain)
+
+
+def test_box_falls_back_to_the_plain_ui_when_the_enclosure_is_missing(monkeypatch):
+    """A missing decoration is a cosmetic loss. It must not cost the demo the
+    interface."""
+    from src.api import service as service_module
+
+    monkeypatch.setattr(service_module, "ENCLOSURE_PATH", Path("/nonexistent.html"))
+    c = client_for(build_service([GOOD_REPLY]))
+
+    r = c.get("/box", follow_redirects=True)
+    assert r.status_code == 200
+    assert "<!DOCTYPE html>" in r.text
+    assert "encl-leaf" not in r.text
+
+
+def test_the_door_is_built_by_script_not_left_shut_in_the_html():
+    """A door drawn in HTML stays shut when its opener fails, turning a
+    decoration into a total failure. Built by script, a broken script means no
+    door at all — the interface is simply there."""
+    html = (REPO_ROOT / "src" / "api" / "static" / "enclosure.html").read_text(
+        encoding="utf-8"
+    )
+
+    before_script = html.split("<script>")[0]  # comment + <style> only
+    assert "<div" not in before_script, "the door is in the HTML and would stay shut"
+    assert 'createElement("div")' in html
+    assert "el.remove()" in html, "the overlay must leave the document, not just hide"
+
+
+def test_the_door_cannot_trap_the_user():
+    """Three independent ways out: it opens itself, any click or key opens it,
+    and a final timeout removes it regardless."""
+    html = (REPO_ROOT / "src" / "api" / "static" / "enclosure.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "setTimeout(open, 900)" in html, "it must open on its own"
+    assert 'addEventListener("click", open)' in html
+    assert "3000" in html, "a last-resort removal must exist"
+    assert "prefers-reduced-motion" in html
+    assert 'p.get("box") === "0"' in html, "there must be a way to skip it"
+
+
+def test_box_reaches_only_this_service():
+    html = (REPO_ROOT / "src" / "api" / "static" / "enclosure.html").read_text(
+        encoding="utf-8"
+    )
+    for pattern in ("http://", "https://", "//cdn"):
+        assert pattern not in html, f"the enclosure reaches outside itself: {pattern!r}"

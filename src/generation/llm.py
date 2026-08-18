@@ -16,6 +16,7 @@ out of any evaluation path.
 from __future__ import annotations
 
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +27,11 @@ DEFAULT_ENV_PATH = REPO_ROOT / ".env"
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_TEMPERATURE = 0.0
-DEFAULT_MAX_TOKENS = 4000
+# Reasoning models spend output tokens on visible thinking before they emit
+# the answer, so a budget sized for the answer alone truncates the JSON
+# mid-string. Overridable from .env because the right value depends entirely on
+# which model you point at: OPENAI_MAX_TOKENS.
+DEFAULT_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS") or 4000)
 
 
 class LLMUnavailableError(RuntimeError):
@@ -190,6 +195,64 @@ def classify_api_error(e: BaseException) -> str:
     return "unknown"
 
 
+PROVIDER_CONSOLES = (
+    ("generativelanguage.googleapis.com", "Google AI Studio quota",
+     "https://aistudio.google.com/app/apikey"),
+    ("openrouter.ai", "OpenRouter credits", "https://openrouter.ai/credits"),
+    ("api.groq.com", "Groq console", "https://console.groq.com/settings/billing"),
+    ("openai.azure.com", "Azure OpenAI quota",
+     "https://portal.azure.com/#browse/Microsoft.CognitiveServices%2Faccounts"),
+)
+
+
+def provider_console(base_url: Optional[str] = None) -> tuple:
+    """Name the console for the endpoint actually configured.
+
+    Sending someone to platform.openai.com when they are pointed at Gemini has
+    happened in this project before, in a different message, and it cost real
+    time: the advice looks authoritative and sends them to an account that is
+    not the one refusing the request. The endpoint is known — use it.
+    """
+    base = (base_url if base_url is not None else os.getenv("OPENAI_BASE_URL") or "").lower()
+    for host, name, url in PROVIDER_CONSOLES:
+        if host in base:
+            return name, url
+    return "OpenAI billing", "https://platform.openai.com/settings/organization/billing"
+
+
+_QUOTA_LIMIT_RE = re.compile(r"limit:\s*([0-9]+)", re.I)
+_QUOTA_WINDOW_RE = re.compile(r"per\s*(day|minute|hour|month)", re.I)
+
+
+def quota_window(msg: str) -> Optional[str]:
+    """Pull "per day" / "per minute" and the number out of a quota refusal.
+
+    These two failures wear the same status code and the same sentence, and
+    they are not the same problem: a per-minute cap clears while you read the
+    message, a per-day cap ends the session's measurements. Providers do say
+    which — buried in a quota id like
+    GenerateRequestsPerDayPerProjectPerModel-FreeTier, several hundred
+    characters into a JSON blob nobody scrolls through.
+
+    Returns None rather than guessing when the message does not say.
+    """
+    if not msg:
+        return None
+    window = None
+    ident = re.search(r"per\s*(day|minute|hour|month)", msg, re.I)
+    if ident:
+        window = ident.group(1).lower()
+    else:
+        # camelCase quota ids: ...RequestsPerDayPerProjectPerModel...
+        camel = re.search(r"Per(Day|Minute|Hour|Month)", msg)
+        if camel:
+            window = camel.group(1).lower()
+    if window is None:
+        return None
+    limit = _QUOTA_LIMIT_RE.search(msg)
+    return f"{limit.group(1)} requests per {window}" if limit else f"a per-{window} cap"
+
+
 def explain_api_error(e: BaseException) -> str:
     """Turn a provider exception into something that names the actual problem.
 
@@ -200,11 +263,20 @@ def explain_api_error(e: BaseException) -> str:
     kind = classify_api_error(e)
 
     if kind == "quota":
+        name, url = provider_console()
+        window = quota_window(msg)
         return (
-            "the API returned 429 with a quota/billing code — the key is valid but "
-            "the account has no credit. This is a billing state, not a network or "
-            "code problem; nothing in this repository can work around it.\n"
-            "  OpenAI billing: https://platform.openai.com/settings/organization/billing\n"
+            "the API returned 429 with a quota/billing code — the key is valid, "
+            "but the allowance behind it is used up. Not a network or code "
+            "problem; nothing in this repository can work around it.\n"
+            + (f"  WHICH ALLOWANCE: {window}\n" if window else "")
+            + f"  Provider said: {msg[:1200]}\n"
+            f"  {name}: {url}\n"
+            "  A PER-MINUTE cap clears in about a minute — pace the run and\n"
+            "  continue. A PER-DAY cap does not: it resets on the provider's\n"
+            "  clock, so today's remaining work has to fit what is left or wait\n"
+            "  for tomorrow. Either way this is an allowance, not necessarily an\n"
+            "  empty wallet — check the quota page before paying anyone.\n"
             "  Note that listing models is free, so a key can pass every "
             "connectivity check and still fail on the first generation."
         )
@@ -227,8 +299,18 @@ def explain_api_error(e: BaseException) -> str:
             "check OPENAI_BASE_URL matches the key you are using."
         )
     if kind == "model":
+        # The provider's own text is the useful part and is routinely more
+        # specific than anything we can say — Google's 404 for a retired model
+        # names its replacement outright. Suppressing it in favour of generic
+        # advice sent a new contributor round three cycles of re-checking a
+        # spelling that was never wrong.
         return (
-            "the API returned 404 for the model. Check OPENAI_MODEL in .env.\n"
+            f"the API returned 404 for the model.\n"
+            f"  Provider said: {msg[:400]}\n"
+            "  Read that message before re-checking the spelling: a 404 here often\n"
+            "  means the name is correct but this key may not use it — providers\n"
+            "  retire models for newly created keys while still listing them.\n"
+            "  See what this key can reach:  python scripts/list_models.py\n"
             "  On Azure this must be your DEPLOYMENT name, not the model family name."
         )
     if kind == "connection":
@@ -477,13 +559,19 @@ class OpenAIClient(LLMClient):
         latency_ms = (time.perf_counter() - t0) * 1000
 
         usage = getattr(resp, "usage", None)
+        choice = resp.choices[0]
         return LLMResponse(
-            text=resp.choices[0].message.content or "",
+            text=choice.message.content or "",
             model=self.model,
             provider=self.provider,
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             completion_tokens=getattr(usage, "completion_tokens", None),
             latency_ms=latency_ms,
+            # "length" means the reply was cut off by max_tokens. Downstream
+            # this is the difference between "the model produced bad JSON" and
+            # "the model produced good JSON that we truncated" — same symptom,
+            # opposite fix.
+            raw={"finish_reason": getattr(choice, "finish_reason", None)},
         )
 
 

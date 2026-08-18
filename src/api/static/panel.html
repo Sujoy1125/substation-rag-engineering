@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Substation O&amp;M Assistant — Panel</title>
+<link rel="icon" href="data:,">
+<!--
+  THE PANEL VIEW — an alternative skin, not an alternative system.
+  Served at /panel; the standard interface stays at /.
+
+  The metaphor is a substation control panel, because that is what the people
+  who would use this already read. It buys one thing that a web layout cannot:
+  a STATUS LAMP. This system has exactly three outcomes — answered, declined,
+  faulted — and a lamp is read faster than a sentence. On a real panel, green
+  and amber are both normal operating states, which is precisely the point we
+  keep having to make in words: declining to answer is designed behaviour, not
+  an error.
+
+  WHERE THE METAPHOR STOPS, DELIBERATELY:
+
+  The answer itself sits on a pale "docket" inset into the chassis, not on a
+  simulated LCD. Seven-segment styling is wonderful for `60 kV` and punishing
+  for three lines of prose, and the prose is the part someone acts on. Panel
+  chrome frames the document; it does not become it.
+
+  Bezel and screws are drawn in CSS at a fixed small size and collapse away
+  under 700px. On a phone every pixel of fake metal is a pixel not spent on the
+  answer, and a phone in a switchyard is the real use case.
+
+  WHAT IS IDENTICAL TO THE STANDARD VIEW, AND MUST STAY SO:
+    * the gate's true state is shown on every answer
+    * safety text is labelled as recorded in the source, never as advice
+    * a provider failure is visibly NOT an abstention
+    * claims carry their evidence; uncited claims are flagged, not hidden
+    * sentinel values are shown, never quietly dropped
+  A skin may change how something is read. It may not change what is claimed.
+
+  Dependency-free: no CDN, no framework, no web fonts.
+-->
+<style>
+  :root {
+    /* Chassis: cool rolled steel, lit from above. */
+    --steel-1:#2b3138; --steel-2:#20262c; --steel-3:#171c21; --steel-edge:#3c444d;
+    --groove:#12161a; --screw:#4a525b;
+    /* Docket: the readable surface. */
+    --paper:#f4f1ea; --paper-2:#e8e4da; --paper-line:#d3cec2;
+    --ink:#1b1f24; --ink-2:#4d545c; --ink-3:#7c848d;
+    /* Lamps. Green and amber are both NORMAL operating states. */
+    --lamp-green:#3ddc6b; --lamp-amber:#ffb527; --lamp-red:#ff4d42; --lamp-off:#39414a;
+    --accent:#4aa3ff;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:34px;
+  }
+  * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
+  body {
+    margin:0; min-height:100vh; color:#dfe4ea;
+    background:
+      radial-gradient(1200px 500px at 50% -10%, #39424b 0%, transparent 60%),
+      linear-gradient(180deg, var(--steel-2), var(--steel-3));
+    font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .num,.mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+  /* ---------- chassis ---------- */
+  .chassis {
+    max-width:980px; margin:26px auto; position:relative;
+    background:linear-gradient(180deg, var(--steel-1), var(--steel-2) 55%, var(--steel-3));
+    border:1px solid var(--steel-edge); border-radius:14px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.10), 0 24px 60px -28px #000;
+    padding:var(--s5);
+  }
+  /* Four screws. Pure decoration, and the only decoration in the file. */
+  .screw { position:absolute; width:11px; height:11px; border-radius:50%;
+           background:radial-gradient(circle at 35% 30%, #6d757e, var(--screw) 60%, #2c3238);
+           box-shadow: inset 0 1px 1px rgba(255,255,255,.35), 0 1px 2px #000; }
+  .screw::after { content:""; position:absolute; inset:3px 2px; border-top:1.5px solid #2b3137; transform:rotate(35deg); }
+  .screw.tl{top:11px;left:11px} .screw.tr{top:11px;right:11px}
+  .screw.bl{bottom:11px;left:11px} .screw.br{bottom:11px;right:11px}
+
+  /* Engraved label — cut into the metal, so a dark shadow above and a light one below. */
+  .engrave { font-size:10.5px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase;
+             color:#98a2ac; text-shadow:0 -1px 0 rgba(0,0,0,.65), 0 1px 0 rgba(255,255,255,.07); }
+
+  /* ---------- header rail ---------- */
+  .rail { display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap;
+          padding-bottom:var(--s4); border-bottom:1px solid var(--groove);
+          box-shadow:0 1px 0 rgba(255,255,255,.05); }
+  .brand h1 { margin:0; font-size:16px; font-weight:650; letter-spacing:.3px; color:#eef2f6; }
+  .brand p  { margin:2px 0 0; font-size:11px; color:#8b949e; }
+  .gauges { margin-left:auto; display:flex; gap:var(--s5); align-items:center; flex-wrap:wrap; }
+  .gauge .engrave { display:block; margin-bottom:3px; }
+  .gauge b { font-family:var(--mono); font-size:15px; color:#dfe4ea; }
+
+  /* Physical toggle. */
+  .toggle { display:flex; align-items:center; gap:var(--s2); cursor:pointer; user-select:none; }
+  .toggle input { appearance:none; width:44px; height:22px; border-radius:11px; cursor:pointer;
+                  background:linear-gradient(180deg,#151a1f,#232a31);
+                  border:1px solid #101418; box-shadow:inset 0 2px 5px rgba(0,0,0,.7); position:relative; }
+  .toggle input::after { content:""; position:absolute; top:2px; left:2px; width:16px; height:16px;
+                         border-radius:50%; background:linear-gradient(180deg,#c9d1d9,#8b949e);
+                         box-shadow:0 1px 2px #000; transition:transform .16s; }
+  .toggle input:checked { background:linear-gradient(180deg,#123a5c,#1b5a8c); }
+  .toggle input:checked::after { transform:translateX(22px); }
+
+  /* ---------- status lamp ---------- */
+  .lamp-housing { display:flex; align-items:center; gap:var(--s3); }
+  .lamp { width:26px; height:26px; border-radius:50%; flex:none; background:var(--lamp-off);
+          border:3px solid #101418;
+          box-shadow: inset 0 2px 4px rgba(0,0,0,.6), 0 0 0 1px #3a424b; }
+  .lamp.on-green { background:var(--lamp-green); box-shadow:inset 0 1px 2px rgba(255,255,255,.5), 0 0 16px 2px rgba(61,220,107,.55), 0 0 0 1px #3a424b; }
+  .lamp.on-amber { background:var(--lamp-amber); box-shadow:inset 0 1px 2px rgba(255,255,255,.5), 0 0 16px 2px rgba(255,181,39,.55), 0 0 0 1px #3a424b; }
+  .lamp.on-red   { background:var(--lamp-red);   box-shadow:inset 0 1px 2px rgba(255,255,255,.5), 0 0 16px 2px rgba(255,77,66,.55), 0 0 0 1px #3a424b; }
+  .lamp-text b { display:block; font-size:13px; letter-spacing:1.2px; text-transform:uppercase; }
+  .lamp-text span { font-size:12px; color:#8b949e; }
+  .on-green + .lamp-text b { color:var(--lamp-green); }
+  .on-amber + .lamp-text b { color:var(--lamp-amber); }
+  .on-red   + .lamp-text b { color:var(--lamp-red); }
+
+  /* ---------- annunciator bank ----------
+     All three lamps are present before a question is asked, and exactly one
+     lights. That is how a real annunciator reads, and it does something no
+     paragraph of explanation manages: it tells a first-time viewer that
+     "no answer" is one of the designed outcomes, not the system failing. A
+     lamp that only appears once it is lit teaches nothing in advance. */
+  .bank { margin-top:var(--s5); background:linear-gradient(180deg,#1a1f25,#141920);
+          border:1px solid var(--groove); border-radius:10px; padding:var(--s4);
+          box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }
+  .bank-head { display:flex; align-items:baseline; gap:var(--s3); }
+  .bank-head .state { margin-left:auto; }
+  .bank-lamps { display:flex; gap:var(--s3); margin-top:var(--s3); }
+  .unit { flex:1 1 0; min-width:0; display:flex; align-items:flex-start; gap:10px;
+          padding:10px 12px; border:1px solid #232a31; border-radius:8px;
+          background:#12161b; opacity:.42; transition:opacity .18s ease; }
+  .unit.active { opacity:1; border-color:#39424c; background:#161c22; }
+  .unit .lamp { width:20px; height:20px; border-width:2px; margin-top:1px; }
+  .unit-text { min-width:0; }
+  .unit-text b { display:block; font-size:12px; letter-spacing:1.1px;
+                 text-transform:uppercase; color:#c2cad3; }
+  .unit-text span { display:block; font-size:11.5px; line-height:1.45; color:#7d8792; }
+  .unit.active.k-green .unit-text b { color:var(--lamp-green); }
+  .unit.active.k-amber .unit-text b { color:var(--lamp-amber); }
+  .unit.active.k-red   .unit-text b { color:var(--lamp-red); }
+  @media (max-width:700px) { .bank-lamps { flex-direction:column; } }
+
+  /* ---------- input bay ---------- */
+  .bay { margin-top:var(--s5); background:linear-gradient(180deg,#1a1f25,#161b20);
+         border:1px solid var(--groove); border-radius:10px; padding:var(--s4);
+         box-shadow: inset 0 2px 6px rgba(0,0,0,.55); }
+  .askrow { display:flex; gap:var(--s2); margin-top:var(--s2); }
+  #q { flex:1; min-width:0; padding:13px 14px; font-size:16px; color:#eef2f6;
+       background:#0e1216; border:1px solid #0a0d10; border-radius:8px;
+       box-shadow: inset 0 2px 6px rgba(0,0,0,.7); font-family:var(--mono); }
+  #q::placeholder { color:#5b646d; }
+  #q:focus { outline:none; border-color:var(--accent); box-shadow: inset 0 2px 6px rgba(0,0,0,.7), 0 0 0 3px rgba(74,163,255,.2); }
+  #go { padding:13px 24px; font-size:14px; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+        border:1px solid #0d2d4a; border-radius:8px; cursor:pointer; color:#eaf3ff;
+        background:linear-gradient(180deg,#2e7fd0,#1f5f9f);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 2px 0 #123a5c; }
+  #go:active:not(:disabled) { transform:translateY(2px); box-shadow: inset 0 1px 0 rgba(255,255,255,.2); }
+  #go:disabled { opacity:.5; cursor:default; }
+
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:var(--s2); }
+  .chip { font-size:12px; padding:6px 11px; border-radius:6px; cursor:pointer; color:#aeb7c0;
+          background:linear-gradient(180deg,#242b32,#1c2229); border:1px solid #0f1317;
+          box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  .chip:hover { color:#eef2f6; border-color:var(--accent); }
+  .chip[aria-pressed="true"] { background:linear-gradient(180deg,#1f5f9f,#17456f); color:#fff; }
+  .chip .n { font-family:var(--mono); font-size:10.5px; opacity:.65; margin-left:5px; }
+
+  /* ---------- the docket: where reading happens ---------- */
+  .docket { margin-top:var(--s5); background:var(--paper); color:var(--ink);
+            border-radius:8px; border:1px solid #b9b3a6;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,.6), 0 10px 26px -14px rgba(0,0,0,.8);
+            padding:var(--s5); }
+  .docket .meta { font-size:12px; color:var(--ink-3); font-family:var(--mono); }
+  .qline { font-size:13.5px; color:var(--ink-2); padding-bottom:var(--s3);
+           border-bottom:1px solid var(--paper-line); margin-bottom:var(--s4); }
+  .qline b { color:var(--ink-3); font-size:10.5px; letter-spacing:1px; text-transform:uppercase; margin-right:8px; }
+  .answer-text { font-size:17px; line-height:1.6; white-space:pre-wrap; }
+  .note { color:var(--ink-2); font-size:14.5px; }
+  .sect { display:flex; align-items:center; gap:var(--s3); margin:var(--s5) 0 var(--s3); }
+  .sect h3 { margin:0; font-size:10.5px; font-weight:700; letter-spacing:1.2px;
+             text-transform:uppercase; color:var(--ink-3); }
+  .sect .rule { flex:1; height:1px; background:var(--paper-line); }
+
+  .claim { display:flex; gap:var(--s3); align-items:baseline; padding:8px 0;
+           border-bottom:1px solid var(--paper-line); font-size:14.5px; }
+  .claim:last-of-type { border-bottom:none; }
+  .claim-t { flex:1; min-width:0; }
+  .claim-e { flex:none; white-space:nowrap; }
+  .ev-label { display:inline-block; font-family:var(--mono); font-size:11.5px; font-weight:700;
+              padding:2px 7px; margin:0 2px; border-radius:4px; cursor:pointer;
+              color:#123a5c; background:#cfe2f5; border:1px solid #8fb6dd; }
+  .ev-label:hover { background:#1f5f9f; color:#fff; }
+  .unsupported { font-size:11px; font-weight:700; padding:2px 8px; border-radius:4px;
+                 color:#8c1d16; background:#f6d9d6; border:1px solid #d9a49e; }
+
+  .facts { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:var(--s2); margin-top:var(--s4); }
+  .fact { border:1px solid var(--paper-line); border-radius:6px; background:var(--paper-2); padding:var(--s3) var(--s4); }
+  .fact .k { font-size:10px; font-weight:700; letter-spacing:1.1px; text-transform:uppercase; color:var(--ink-3); }
+  .fact .v { font-family:var(--mono); font-size:21px; font-weight:600; margin-top:3px; }
+  .fact .s { font-family:var(--mono); font-size:11px; color:var(--ink-3); }
+  .quoted { display:flex; gap:var(--s3); padding:7px 0; border-bottom:1px solid var(--paper-line); font-size:14px; }
+  .quoted .qk { flex:none; width:110px; font-size:10px; font-weight:700; letter-spacing:.9px;
+                text-transform:uppercase; color:var(--ink-3); }
+  .quoted .qv { flex:1; min-width:0; }
+  .quoted .qs { flex:none; font-family:var(--mono); font-size:11px; color:var(--ink-3); }
+
+  .safety { border:1px solid #d9a49e; background:#faeae8; border-radius:6px;
+            padding:var(--s3) var(--s4); margin-bottom:var(--s4); }
+  .safety h4 { margin:0 0 var(--s2); font-size:10.5px; font-weight:700; letter-spacing:1.1px;
+               text-transform:uppercase; color:#8c1d16; }
+  .safety p { margin:0 0 var(--s2); font-size:14.5px; }
+  .safety .src { font-family:var(--mono); font-size:11px; color:var(--ink-3); }
+  .safety .caveat { border-top:1px solid #d9a49e; padding-top:var(--s2); margin-top:var(--s3);
+                    font-size:12px; color:var(--ink-2); }
+
+  .src-item { display:flex; gap:var(--s3); padding:var(--s3) 0; border-bottom:1px solid var(--paper-line); }
+  .src-item:last-child { border-bottom:none; }
+  .src-n { flex:none; width:28px; height:28px; border-radius:4px; background:var(--paper-2);
+           border:1px solid var(--paper-line); font-family:var(--mono); font-size:11px;
+           display:grid; place-items:center; color:var(--ink-2); }
+  .src-title { font-weight:650; font-size:14.5px; line-height:1.4; color:#123a5c; cursor:pointer; }
+  .src-title:hover { text-decoration:underline; }
+  .src-meta { margin-top:5px; display:flex; gap:6px; flex-wrap:wrap; align-items:center;
+              font-size:11.5px; color:var(--ink-3); }
+  .badge { font-size:10px; padding:2px 7px; border-radius:3px; border:1px solid var(--paper-line);
+           background:var(--paper-2); color:var(--ink-2); }
+  .badge.high { color:#1a6b38; border-color:#a8ccb4; background:#e6f3ea; }
+  .badge.safety { color:#8c1d16; border-color:#d9a49e; background:#f6d9d6; font-weight:700; }
+  .id { font-family:var(--mono); }
+
+  .actions { display:flex; gap:var(--s2); flex-wrap:wrap; margin-top:var(--s5); }
+  .btn { font-size:12.5px; padding:8px 14px; border-radius:6px; cursor:pointer; color:var(--ink-2);
+         background:var(--paper-2); border:1px solid var(--paper-line); }
+  .btn:hover { color:var(--ink); border-color:#8fb6dd; }
+
+  /* ---------- engineering strip (Detail) ---------- */
+  .eng { margin-top:var(--s5); border-top:1px dashed var(--paper-line); padding-top:var(--s2); }
+  table.ev { width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.ev th { text-align:left; padding:7px 9px; color:var(--ink-3); font-size:10px;
+                font-weight:700; letter-spacing:.8px; text-transform:uppercase;
+                border-bottom:1px solid var(--paper-line); }
+  table.ev td { padding:7px 9px; border-bottom:1px solid var(--paper-line); }
+  tr.uncited td { color:var(--ink-3); }
+  .tag-cited { color:#1a6b38; font-weight:700; }
+  .sigrow { display:grid; grid-template-columns:170px 1fr 42px; gap:var(--s3); align-items:center;
+            font-size:12px; margin-bottom:5px; color:var(--ink-2); }
+  .bar { height:8px; border-radius:2px; background:#ddd8cc; overflow:hidden; box-shadow:inset 0 1px 2px rgba(0,0,0,.15); }
+  .bar span { display:block; height:100%; background:linear-gradient(180deg,#4aa3ff,#1f5f9f); }
+
+  /* ---------- coverage meters (idle state) ---------- */
+  .meters { margin-top:var(--s5); }
+  .meter { display:flex; align-items:center; gap:var(--s3); font-size:12.5px; color:#aeb7c0; margin-bottom:6px; }
+  .meter .nm { width:150px; flex:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .meter .tr { flex:1; height:10px; border-radius:2px; background:#12161a;
+               box-shadow: inset 0 2px 4px rgba(0,0,0,.7); overflow:hidden; position:relative; }
+  .meter .tr span { display:block; height:100%; background:linear-gradient(180deg,#4aa3ff,#1b5a8c); }
+  /* Tick marks, drawn over the trough — the detail that makes it read as an instrument. */
+  .meter .tr::after { content:""; position:absolute; inset:0;
+    background:repeating-linear-gradient(90deg, transparent 0 19px, rgba(255,255,255,.10) 19px 20px); }
+  .meter .ct { width:44px; text-align:right; font-family:var(--mono); font-size:11.5px; color:#8b949e; }
+
+  footer { max-width:980px; margin:0 auto var(--s6); padding:0 var(--s5); color:#6d757e; font-size:11.5px; }
+  footer a { color:#8fb6dd; }
+
+  dialog { border:1px solid #b9b3a6; border-radius:8px; background:var(--paper); color:var(--ink);
+           max-width:780px; width:94%; padding:0; }
+  dialog::backdrop { background:rgba(0,0,0,.72); }
+  .dlg-head { position:sticky; top:0; background:var(--paper-2); padding:var(--s3) var(--s4);
+              border-bottom:1px solid var(--paper-line); display:flex; justify-content:space-between; align-items:center; }
+  .dlg-head strong { font-family:var(--mono); font-size:13px; }
+  .dlg-body { padding:var(--s2) var(--s4) var(--s4); max-height:70vh; overflow:auto; }
+  .field { display:grid; grid-template-columns:minmax(0,220px) minmax(0,1fr); gap:var(--s4);
+           padding:8px 0; border-bottom:1px solid var(--paper-line); font-size:13.5px; }
+  .field .k { font-family:var(--mono); font-size:11.5px; color:var(--ink-3); }
+  .field .v.sentinel { color:var(--ink-3); font-style:italic; }
+  .field .k,.field .v { overflow-wrap:anywhere; }
+
+  .skel { height:12px; border-radius:3px; margin-bottom:9px; background:#ddd8cc; }
+
+  /* On a phone, fake metal is a pixel not spent on the answer. */
+  @media (max-width:700px) {
+    .chassis { margin:0; border-radius:0; border-left:none; border-right:none; padding:var(--s4); }
+    .screw { display:none; }
+    .gauges { width:100%; margin-left:0; gap:var(--s4); }
+    .askrow { flex-direction:column; }
+    #go { width:100%; padding:15px; }
+    .docket { padding:var(--s4); }
+    .facts { grid-template-columns:1fr; }
+    .field { grid-template-columns:1fr; gap:2px; }
+    .meter .nm { width:110px; }
+    table.ev th:nth-child(4), table.ev td:nth-child(4) { display:none; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+  @media print {
+    body { background:#fff; }
+    .chassis { box-shadow:none; border:none; background:#fff; padding:0; }
+    .rail,.bay,.meters,.actions,.eng,footer,.screw { display:none !important; }
+    .docket { box-shadow:none; border:1px solid #999; }
+  }
+</style>
+</head>
+<body>
+
+<div class="chassis">
+  <span class="screw tl"></span><span class="screw tr"></span>
+  <span class="screw bl"></span><span class="screw br"></span>
+
+  <div class="rail">
+    <div class="brand">
+      <h1>Substation O&amp;M Assistant</h1>
+      <p>Evidence-grounded answers from CEA and BHEL O&amp;M documents</p>
+    </div>
+    <div class="gauges" id="gauges"></div>
+    <label class="toggle" title="Retrieval scores, gate signals, uncited evidence">
+      <input type="checkbox" id="engmode"><span class="engrave">Detail</span>
+    </label>
+  </div>
+
+  <div class="bay">
+    <span class="engrave">Query</span>
+    <div class="askrow">
+      <input id="q" type="text" maxlength="1000" autocomplete="off" enterkeyhint="search"
+             aria-label="Your question"
+             placeholder="inspection interval for transformer bushings">
+      <button id="go">Ask</button>
+    </div>
+
+    <div style="margin-top:var(--s4)"><span class="engrave">Equipment context</span></div>
+    <div class="chips" id="equip"></div>
+
+    <div style="margin-top:var(--s4)"><span class="engrave">Test questions</span></div>
+    <div class="chips">
+      <button class="chip ex" data-q="How often should transformer insulating oil be tested for BDV?">interval</button>
+      <button class="chip ex" data-q="What safety precautions apply before working on a circuit breaker?">safety</button>
+      <button class="chip ex" data-q="What is the recommended torque for a 400 kV GIS flange bolt?">off-corpus</button>
+      <button class="chip ex" data-q="What is the maintenance interval?">ambiguous</button>
+    </div>
+  </div>
+
+  <div class="bank">
+    <div class="bank-head">
+      <span class="engrave">Status</span>
+      <span class="engrave state" id="gatestate"></span>
+    </div>
+    <div class="bank-lamps" id="bank" role="status" aria-live="polite">
+      <div class="unit k-green" id="u-green">
+        <span class="lamp"></span>
+        <span class="unit-text"><b id="l-green">Answer</b>
+          <span id="s-green">grounded in the cited sources</span></span>
+      </div>
+      <div class="unit k-amber" id="u-amber">
+        <span class="lamp"></span>
+        <span class="unit-text"><b id="l-amber">No answer</b>
+          <span id="s-amber">the documents do not support one — a normal outcome</span></span>
+      </div>
+      <div class="unit k-red" id="u-red">
+        <span class="lamp"></span>
+        <span class="unit-text"><b id="l-red">Fault</b>
+          <span id="s-red">a failure in the system, not a finding about the documents</span></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="out" aria-live="polite"></div>
+
+  <div class="meters" id="idle">
+    <span class="engrave">Knowledge base coverage</span>
+    <div id="coverage" style="margin-top:var(--s3)"></div>
+  </div>
+</div>
+
+<footer>
+  Answers are generated only from retrieved chunks of the frozen knowledge base (KB_v1.1).
+  Intervals, limits and safety text are read from the knowledge base record, not from generated
+  text. Standard interface at <a href="/">/</a> · API at <a href="/docs">/docs</a>.
+</footer>
+
+<dialog id="dlg">
+  <div class="dlg-head"><strong id="dlg-title">Evidence</strong>
+    <button class="btn" onclick="document.getElementById('dlg').close()">Close</button></div>
+  <div class="dlg-body" id="dlg-body"></div>
+</dialog>
+
+<script>
+const SENTINELS = new Set(["NOT VERIFIED","NOT COVERED","NOT APPLICABLE","N/A",""]);
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let FACETS = null, selectedEquipment = null, lastPayload = null;
+
+/* ---------- boot ---------- */
+async function boot() {
+  try {
+    const h = await (await fetch("/health")).json();
+    // The gate's true state is a lamp of its own. An uncalibrated gate is an
+    // amber standing indication, not a hidden footnote.
+    $("gauges").innerHTML =
+      `<div class="gauge"><span class="engrave">KB</span><b>${h.kb_chunks}</b></div>
+       <div class="gauge" data-eng><span class="engrave">top-k</span><b>${h.top_k}</b></div>
+       <div class="gauge" data-eng><span class="engrave">model</span><b style="font-size:12px">${esc(h.llm.model)}</b></div>
+       <div class="lamp-housing">
+         <span class="lamp ${h.gated ? "on-green" : "on-amber"}"></span>
+         <span class="lamp-text"><b>${h.gated ? "GATE ON" : "GATE OFF"}</b>
+         <span>${h.gated ? "calibrated" : "not calibrated"}</span></span>
+       </div>`;
+  } catch (e) {
+    $("gauges").innerHTML = `<div class="lamp-housing"><span class="lamp on-red"></span>
+      <span class="lamp-text"><b>OFFLINE</b><span>service unreachable</span></span></div>`;
+  }
+  try {
+    FACETS = await (await fetch("/facets")).json();
+    $("equip").innerHTML = FACETS.equipment.slice(0,10).map(e =>
+      `<button class="chip eq" aria-pressed="false" data-eq="${esc(e.name)}">${esc(e.name)}<span class="n">${e.chunks}</span></button>`).join("");
+    document.querySelectorAll(".eq").forEach(el => el.addEventListener("click", () => pickEquipment(el)));
+    const top = FACETS.equipment.slice(0,8), max = Math.max(...top.map(e=>e.chunks),1);
+    $("coverage").innerHTML = top.map(e =>
+      `<div class="meter"><span class="nm">${esc(e.name)}</span>
+        <span class="tr"><span style="width:${Math.round(e.chunks/max*100)}%"></span></span>
+        <span class="ct">${e.chunks}</span></div>`).join("") +
+      `<div style="margin-top:10px;font-size:12px;color:#7c848d">${FACETS.total_chunks} chunks across
+       ${FACETS.documents.length} documents. Equipment outside this list is likely outside the corpus.</div>`;
+  } catch (e) { /* the selector is an aid, not a requirement */ }
+  applyEngVisibility();
+}
+
+function pickEquipment(el) {
+  const eq = el.dataset.eq;
+  selectedEquipment = (selectedEquipment === eq) ? null : eq;
+  document.querySelectorAll(".eq").forEach(x =>
+    x.setAttribute("aria-pressed", String(x.dataset.eq === selectedEquipment)));
+}
+function effectiveQuery() {
+  const q = $("q").value.trim();
+  return selectedEquipment && q ? `${q} (${selectedEquipment})` : q;
+}
+
+/* ---------- ask ---------- */
+async function ask() {
+  const question = effectiveQuery();
+  if (!question) { $("q").focus(); return; }
+  $("go").disabled = true; $("go").textContent = "…";
+  $("idle").hidden = true;
+  setBank(null);            // every lamp dark while the question is in flight
+  $("gatestate").textContent = "";
+  $("out").innerHTML = `<div class="docket"><div class="skel" style="width:35%"></div>
+    <div class="skel" style="width:90%"></div><div class="skel" style="width:72%"></div></div>`;
+  try {
+    const r = await fetch("/ask", {method:"POST", headers:{"Content-Type":"application/json"},
+                                   body: JSON.stringify({question})});
+    const body = await r.json();
+    if (!r.ok) renderFailure(r.status, body);
+    else { lastPayload = body; render(body); }
+  } catch (e) { renderFailure(0, {detail:String(e)}); }
+  finally { $("go").disabled = false; $("go").textContent = "Ask"; }
+}
+
+/* A provider failure is a RED lamp — a fault indication, distinct from the
+   amber "declined to answer". Conflating them would claim the knowledge base
+   lacked evidence when nothing was ever asked of it. */
+function renderFailure(code, body) {
+  const detail = body && body.detail
+    ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail, null, 2))
+    : "unknown error";
+  setBank("red", "Service fault" + (code ? " · " + code : ""),
+          "a fault in the system, not a finding about the knowledge base");
+  $("out").innerHTML = `
+    <div style="margin-top:var(--s5)">
+      <div class="docket">
+        <div class="note">Nothing was answered and no evidence was consulted. The knowledge base
+        has not been searched — this must not be read as “no information available”.</div>
+        <pre class="meta" style="white-space:pre-wrap;margin-top:12px">${esc(detail)}</pre>
+      </div>
+    </div>`;
+}
+
+/* ---------- annunciator ----------
+   Exactly one lamp lights. The lit unit's wording is replaced by the precise
+   verdict — CLARIFY rather than the generic "No answer" — so the bank carries
+   the detail rather than being decoration above a second, truer indicator. */
+const BANK_DEFAULT = {
+  green: ["Answer", "grounded in the cited sources"],
+  amber: ["No answer", "the documents do not support one — a normal outcome"],
+  red:   ["Fault", "a failure in the system, not a finding about the documents"],
+};
+
+function setBank(kind, label, sub) {
+  for (const k of ["green", "amber", "red"]) {
+    const on = k === kind;
+    $("u-" + k).classList.toggle("active", on);
+    const [dl, ds] = BANK_DEFAULT[k];
+    $("l-" + k).textContent = on && label ? label : dl;
+    $("s-" + k).textContent = on && sub ? sub : ds;
+    $("u-" + k).querySelector(".lamp").className = "lamp" + (on ? " on-" + k : "");
+  }
+}
+
+const VERDICT = {
+  ANSWER:                {lamp:"on-green", label:"ANSWER",              sub:"grounded in the cited sources"},
+  INSUFFICIENT_EVIDENCE: {lamp:"on-amber", label:"NO ANSWER",           sub:"the knowledge base does not support one"},
+  NEEDS_CLARIFICATION:   {lamp:"on-amber", label:"CLARIFY",             sub:"the question is ambiguous as asked"},
+  UNSUPPORTED:           {lamp:"on-red",   label:"WITHHELD",            sub:"could not be tied to retrieved evidence"},
+  PARSE_ERROR:           {lamp:"on-red",   label:"UNUSABLE REPLY",      sub:"the model's reply could not be parsed"},
+};
+
+function render(b) {
+  const v = VERDICT[b.status] || {lamp:"on-red", label:b.status, sub:""};
+  const cited = new Set((b.citations||[]).map(c => c.chunk_id));
+
+  setBank(v.lamp.replace("on-", ""), v.label, v.sub);
+  $("gatestate").textContent = b.gated ? "gated" : "ungated";
+
+  let h = `<div style="margin-top:var(--s5)">
+    <div class="docket">
+      <div class="qline"><b>Question</b>${esc(b.question)}</div>`;
+
+  if (b.safety_notes && b.safety_notes.length) {
+    h += `<div class="safety"><h4>Safety information recorded in the cited source</h4>` +
+      b.safety_notes.map(n => `<p>${esc(n.text)}<br><span class="src">${esc(n.label)} · ${esc(n.chunk_id)}</span></p>`).join("") +
+      `<div class="caveat">Quoted verbatim from the knowledge base. It does not replace the site
+       permit-to-work procedure or a competent person's assessment.</div></div>`;
+  }
+
+  if (b.status === "ANSWER") {
+    h += `<div class="answer-text">${linkLabels(b.answer, b.citations)}</div>` +
+         grounding(b.claims) + keyFacts(b.citations);
+  } else if (b.status === "INSUFFICIENT_EVIDENCE") {
+    h += `<div class="note"><b>No answer is given.</b> The retrieved evidence does not support one` +
+         (b.missing_information ? `: ${esc(b.missing_information)}` : ".") + `</div>` + coverageHint();
+  } else if (b.status === "NEEDS_CLARIFICATION") {
+    h += `<div class="answer-text">${esc(b.clarification_question || "Could you narrow the question?")}</div>`;
+  } else {
+    h += `<div class="note">${esc(b.downgrade_reason || b.display_text || "")}</div>`;
+  }
+
+  if (b.warning) h += `<div class="meta" style="margin-top:14px">${esc(b.warning)}</div>`;
+
+  if (b.citations && b.citations.length) {
+    h += `<div class="sect"><h3>Sources · ${b.citations.length}</h3><div class="rule"></div></div>`;
+    for (const c of b.citations) {
+      const auth = (c.authority_level||"").toUpperCase();
+      h += `<div class="src-item"><div class="src-n">${esc(c.label)}</div><div style="min-width:0">
+        <div class="src-title" onclick="showEvidence('${esc(c.chunk_id)}')">${esc(c.document_title)}</div>
+        <div class="src-meta">
+          <span class="badge ${auth==="HIGH"?"high":""}">${esc(auth||"—")}</span>
+          ${c.knowledge_type ? `<span class="badge ${c.knowledge_type==="SAFETY"?"safety":""}">${esc(c.knowledge_type)}</span>` : ""}
+          <span>${esc(c.organization)}</span><span>·</span><span>${esc(c.section||"—")}</span>
+          <span>·</span><span>${esc(c.page||"—")}</span><span>·</span><span class="id">${esc(c.chunk_id)}</span>
+        </div></div></div>`;
+    }
+  }
+
+  h += `<div class="actions">
+      <button class="btn" onclick="copyAnswer()">${b.status === "ANSWER" ? "Copy answer and sources" : "Copy result"}</button>
+      <button class="btn" onclick="window.print()">Print</button>
+    </div>` + engineering(b, cited) + `</div></div>`;
+  $("out").innerHTML = h;
+  applyEngVisibility();
+}
+
+/* The only regex ever run over the model's prose, and it recognises exactly one
+   thing: an [E1] marker. The chunk it opens comes from the citation payload, so
+   a label the model invented stays inert text rather than becoming a link to
+   something that does not exist. */
+function linkLabels(text, citations) {
+  const by = {};
+  for (const c of citations || []) by[c.label] = c.chunk_id;
+  return esc(text).replace(/\[(E\d+)\]/g, (m, l) =>
+    by[l] ? `<span class="ev-label" onclick="showEvidence('${by[l]}')">${l}</span>` : m);
+}
+
+function grounding(claims) {
+  if (!claims || !claims.length) return "";
+  let h = `<div class="sect"><h3>Grounded in</h3><div class="rule"></div></div>`;
+  for (const c of claims) {
+    const chips = (c.labels||[]).map((l,i) =>
+      `<span class="ev-label" onclick="showEvidence('${esc((c.chunk_ids||[])[i]||"")}')">${esc(l)}</span>`).join("");
+    const flag = c.supported ? chips
+      : `<span class="unsupported" title="the model asserted this without citing valid evidence">not cited</span>`;
+    const bad = (c.invalid_labels||[]).length
+      ? `<span class="unsupported" style="margin-left:6px">invented ${esc(c.invalid_labels.join(", "))}</span>` : "";
+    h += `<div class="claim"><span class="claim-t">${esc(c.text)}</span><span class="claim-e">${flag}${bad}</span></div>`;
+  }
+  return h;
+}
+
+// Same rule as the standard view: a headline card asserts "this IS the value",
+// and most frequency fields hold the table row a value was extracted from.
+function readsAsValue(v) {
+  const t = String(v || "").trim();
+  if (!t || t.length > 40) return false;
+  if (t.split(/\s+/).length > 6) return false;      // a sentence, not a value
+  if (/\(?[a-z]\)|\b\d+\)/.test(t)) return false;   // (a)  b)  12)  list markers
+  if (/\b(shall|should|must|will|during|when|if)\b/i.test(t)) return false;
+  if (/\s\d+$/.test(t)) return false;               // trailing table row number
+  return true;
+}
+
+function keyFacts(citations) {
+  const cards = [], quoted = [], seen = new Set();
+  const add = (k, v, s) => {
+    if (!v || seen.has(k+v)) return;
+    seen.add(k+v);
+    (readsAsValue(v) ? cards : quoted).push({k, v, s});
+  };
+  for (const c of citations || []) {
+    add("Interval", c.frequency, c.label);
+    add("Limit / value", c.technical_limit_value, c.label);
+  }
+  let h = "";
+  if (cards.length) {
+    h += `<div class="facts">` + cards.map(f =>
+      `<div class="fact"><div class="k">${esc(f.k)}</div><div class="v">${esc(f.v)}</div>
+       <div class="s">${esc(f.s)}</div></div>`).join("") + `</div>`;
+  }
+  if (quoted.length) {
+    h += `<div class="sect"><h3>Recorded in the source</h3><div class="rule"></div></div>` +
+      quoted.map(f => `<div class="quoted"><span class="qk">${esc(f.k)}</span>
+        <span class="qv">${esc(f.v)}</span><span class="qs">${esc(f.s)}</span></div>`).join("") +
+      `<div class="meta" style="margin-top:8px">Quoted verbatim from the knowledge base record,
+       which stores these as extracted text rather than as tidy values.</div>`;
+  }
+  return h;
+}
+
+function coverageHint() {
+  if (!FACETS) return "";
+  const top = FACETS.equipment.slice(0,6).map(e => `${esc(e.name)} (${e.chunks})`).join(" · ");
+  return `<div class="meta" style="margin-top:14px">Strongest coverage: ${top}. If your equipment is
+    not listed, the answer is likely outside these ${FACETS.total_chunks} chunks — consult the OEM
+    manual or your supervisor rather than assuming none exists.</div>`;
+}
+
+function engineering(b, cited) {
+  let h = `<div class="eng" data-eng>`;
+  if (b.gate) {
+    h += `<div class="sect"><h3>Confidence gate</h3><div class="rule"></div></div>
+      <div class="meta">decision <b>${esc(b.gate.decision)}</b>` +
+      (b.gate.confidence != null ? ` · score ${b.gate.confidence.toFixed(3)}` : "") +
+      ` · ${esc(b.gate.reason)}</div>`;
+    if (b.gate.signals) {
+      h += `<div style="margin-top:12px">`;
+      for (const [k,val] of Object.entries(b.gate.signals))
+        h += `<div class="sigrow"><span>${esc(k)}</span><span class="bar"><span style="width:${Math.round(val*100)}%"></span></span><span class="mono">${val.toFixed(2)}</span></div>`;
+      h += `</div>`;
+    }
+  }
+  if (b.evidence_considered && b.evidence_considered.length) {
+    h += `<div class="sect"><h3>Retrieved evidence · ${b.evidence_considered.length}</h3><div class="rule"></div></div>
+      <table class="ev"><tr><th>#</th><th>Chunk</th><th>Score</th><th>Equipment</th><th>Used</th></tr>`;
+    for (const e of b.evidence_considered) {
+      const used = cited.has(e.chunk_id);
+      h += `<tr class="${used?"":"uncited"}"><td class="mono">${e.rank}</td>
+        <td class="mono"><span class="src-title" onclick="showEvidence('${esc(e.chunk_id)}')">${esc(e.chunk_id)}</span></td>
+        <td class="mono">${e.score.toFixed(3)}</td><td>${esc(e.equipment||"—")}</td>
+        <td class="${used?"tag-cited":""}">${used?"cited":"not cited"}</td></tr>`;
+    }
+    h += `</table><div class="meta" style="margin-top:8px">Rows marked “not cited” were retrieved and
+      shown to the model, which chose not to rely on them. That is what makes an abstention checkable.</div>`;
+  }
+  h += `<div class="sect"><h3>Run</h3><div class="rule"></div></div>
+    <div class="meta">${esc(b.llm.provider)} / ${esc(b.llm.model)} · retrieval ${b.timing_ms.retrieval} ms ·
+    generation ${b.timing_ms.generation} ms · total ${b.timing_ms.total} ms</div>`;
+  return h + `</div>`;
+}
+
+function applyEngVisibility() {
+  const on = $("engmode").checked;
+  document.querySelectorAll("[data-eng]").forEach(el => el.style.display = on ? "" : "none");
+}
+
+function copyAnswer() {
+  if (!lastPayload) return;
+  const b = lastPayload, lines = [b.question, ""];
+  if (b.safety_notes && b.safety_notes.length) {
+    lines.push("SAFETY INFORMATION RECORDED IN THE CITED SOURCE:");
+    b.safety_notes.forEach(n => lines.push("  - " + n.text));
+    lines.push("");
+  }
+  lines.push(b.status === "ANSWER" ? b.answer : b.display_text, "");
+  if (b.claims && b.claims.length) {
+    lines.push("Grounded in:");
+    b.claims.forEach(c => lines.push(`  ${c.text} — ${(c.labels||[]).join(", ") || "NOT CITED"}`));
+    lines.push("");
+  }
+  if (b.citations && b.citations.length) {
+    lines.push("Sources:");
+    b.citations.forEach(c => lines.push(
+      `  [${c.label}] ${c.document_title} — ${c.section||""} ${c.page||""} — ${c.organization} (${c.authority_level}) — ${c.chunk_id}`));
+  }
+  const text = lines.join("\n");
+  if (navigator.clipboard) navigator.clipboard.writeText(text);
+  else { const t=document.createElement("textarea"); t.value=text; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
+}
+
+const FIELD_ORDER = ["chunk_id","document_title","document_id","organization","authority_level",
+  "source_section","pdf_page","equipment","equipment_subtype","topic","subtopic","knowledge_type",
+  "verified_information","procedure","frequency","technical_limit_value","safety_information",
+  "troubleshooting_failure_information","applicability","notes","original_filename"];
+
+async function showEvidence(chunkId) {
+  $("dlg-title").textContent = chunkId;
+  $("dlg-body").innerHTML = `<div class="skel" style="margin-top:14px;width:60%"></div><div class="skel" style="width:90%"></div>`;
+  $("dlg").showModal();
+  try {
+    const r = await fetch(`/evidence/${encodeURIComponent(chunkId)}`);
+    if (!r.ok) { $("dlg-body").innerHTML = `<div class="note" style="padding-top:14px">No such chunk in the knowledge base.</div>`; return; }
+    const c = await r.json();
+    const keys = FIELD_ORDER.filter(k => k in c).concat(Object.keys(c).filter(k => !FIELD_ORDER.includes(k)));
+    // Sentinels shown greyed, never hidden — "NOT VERIFIED" is a fact about the KB.
+    $("dlg-body").innerHTML = keys.map(k => {
+      const val = c[k], sent = SENTINELS.has(String(val ?? "").trim().toUpperCase());
+      return `<div class="field"><div class="k">${esc(k)}</div><div class="v ${sent?"sentinel":""}">${esc(val)||"—"}</div></div>`;
+    }).join("");
+  } catch (e) { $("dlg-body").innerHTML = `<div class="note" style="padding-top:14px">${esc(e)}</div>`; }
+}
+
+$("go").addEventListener("click", ask);
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") ask(); });
+$("engmode").addEventListener("change", applyEngVisibility);
+document.querySelectorAll(".ex").forEach(el =>
+  el.addEventListener("click", () => { $("q").value = el.dataset.q; ask(); }));
+boot();
+</script>
+</body>
+</html>
